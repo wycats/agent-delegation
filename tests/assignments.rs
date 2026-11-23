@@ -26,6 +26,7 @@ struct Fixture {
     dir: PathBuf,
     listener: UnixListener,
     plugin_uri: String,
+    named: bool,
 }
 
 fn write(path: impl AsRef<Path>, value: &Value) {
@@ -80,7 +81,15 @@ esac
             dir,
             listener,
             plugin_uri,
+            named: false,
         }
+    }
+
+    fn named() -> Self {
+        let mut fixture = Self::new();
+        fs::write(fixture.dir.join("targets.toml"), "[targets.work-neon]\nbackend = 'ahp'\nassignment = { config = 'config', receipt = 'receipt' }\n").unwrap();
+        fixture.named = true;
+        fixture
     }
 
     fn receipt(&self) -> Value {
@@ -89,10 +98,16 @@ esac
 
     fn command(&self, mode: &str) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_agent-delegation"));
-        cmd.args(["ahp", mode])
-            .arg(self.dir.join("config"))
-            .arg(self.dir.join("receipt"))
-            .env("FIXTURE", &self.dir)
+        if self.named {
+            cmd.arg("--config")
+                .arg(self.dir.join("targets.toml"))
+                .args(["--target", "work-neon", mode]);
+        } else {
+            cmd.args(["ahp", mode])
+                .arg(self.dir.join("config"))
+                .arg(self.dir.join("receipt"));
+        }
+        cmd.env("FIXTURE", &self.dir)
             .env("PATH", "")
             .env("VSCODE_IPC_HOOK_CLI", "wrong-editor")
             .kill_on_drop(true);
@@ -128,6 +143,14 @@ esac
                 Some("reconnect") => {
                     assert_eq!(p["clientId"], "saved-client");
                     assert_eq!(p["subscriptions"], json!([SESSION, CHAT]));
+                    if mode == "inspect" {
+                        let request = json!({"jsonrpc":"2.0","id":89,"method":"resourceRead","params":{"uri":format!("{}/SKILL.md", self.plugin_uri)}});
+                        ws.send(Message::text(request.to_string())).await.unwrap();
+                        let reply = ws.next().await.unwrap().unwrap();
+                        let reply: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+                        assert_eq!(reply["id"], 89);
+                        assert_eq!(reply["result"], json!({"data": "c2tpbGw="}));
+                    }
                     ws.send(Message::text(json!({"jsonrpc":"2.0","id":m["id"],"error":{"code":-32008,"message":"expired"}}).to_string())).await.unwrap();
                     continue;
                 }
@@ -375,4 +398,25 @@ async fn unsuccessful_terminal_results_keep_the_hosts_outcome() {
         assert_eq!(records.last().unwrap()["outcome"], outcome);
         assert_eq!(f.receipt()["attempt"]["outcome"], outcome);
     }
+}
+
+#[tokio::test]
+async fn named_target_uses_one_receipt_from_preflight_through_recovery() {
+    let f = Fixture::named();
+    let receipt = f.receipt();
+    assert_eq!(f.invoke("check", End::Check, None).await.0, 0);
+    assert_eq!(f.receipt(), receipt);
+    assert_eq!(f.invoke("submit", End::Disconnect, None).await.0, 2);
+    let turn = f.receipt()["attempt"]["turnId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (code, inspected) = f.invoke("inspect", End::Check, Some(&turn)).await;
+    assert_eq!(code, 0);
+    assert_eq!(inspected.last().unwrap()["activeTurnId"], turn);
+    let (code, watched) = f.invoke("watch", End::Complete, Some(&turn)).await;
+    assert_eq!(code, 0);
+    assert_eq!(watched.last().unwrap()["turnId"], turn);
+    assert_eq!(f.receipt()["attempt"]["outcome"], "complete");
+    assert_eq!(f.receipt()["privateExtras"], "preserved");
 }

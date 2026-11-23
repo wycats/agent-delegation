@@ -17,6 +17,10 @@ Save your usual destinations in `~/.config/agent-delegation/targets.toml` on mac
 ```toml
 [targets.work-neon]
 backend = "ahp"
+assignment = { config = "work/neon-config.json", receipt = "work/neon-receipt.json" }
+
+[targets.editor-chat]
+backend = "ahp"
 code = "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
 user_data_dir = "/absolute/path/to/the/owning/profile"
 session = "REPLACE_WITH_SESSION_URI"
@@ -35,9 +39,12 @@ model = "claude-fable-5-2"
 ```sh
 agent-delegation targets
 agent-delegation --target work-neon status
-agent-delegation --target work-neon send task.txt
+agent-delegation --target work-neon check
+agent-delegation --target work-neon submit task.txt
 agent-delegation --target personal-neon run --cwd "$PWD" --task task.txt --run-dir "$PWD/run-1"
 ```
+
+For a saved assignment, point the target at the operator’s existing config and receipt. Relative file paths in `assignment` resolve beside `targets.toml`. All four commands use that receipt. The `check` command observes the chat, `submit` records a turn, `inspect` refreshes its local transcript, and `watch` reconnects to the recorded turn. The low-level chat commands also use the editor, session, chat and model from these files. [Assignment setup](docs/ahp-assignments.md)
 
 An AHP target binds an existing chat to its model and owning installation. Omitting `code` selects `code` on PATH. Omitting `user_data_dir` selects that installation's default profile. A named target takes precedence over the shell's editor and profile settings. Use literal paths in TOML. The AHP client obtains fresh endpoint credentials from the editor for each command.
 

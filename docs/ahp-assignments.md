@@ -9,6 +9,23 @@ agent-delegation ahp submit "$config" "$receipt" "$prompt_file"
 
 `check` uses a fresh observer identity and prints a summary without chat text. `submit` opens the existing session and chat recorded in the receipt, verifies the model and reasoning level against that session provider's catalog, and confirms that the configured plugin skills have loaded before starting the turn. The UTF-8 prompt file is passed through with its whitespace intact. Keep the process running if it reports `waiting`. It continues serving read-only plugin resources and observing the recorded turn.
 
+## Run by target name
+
+Give the saved pair a name in the local target registry. The paths can be absolute or relative to the directory containing `targets.toml`.
+
+```toml
+[targets.work-neon]
+backend = "ahp"
+assignment = { config = "work/neon-config.json", receipt = "work/neon-receipt.json" }
+```
+
+```sh
+agent-delegation --target work-neon check
+agent-delegation --target work-neon submit "$prompt_file"
+```
+
+After an interrupted assignment, `--target work-neon inspect` and `--target work-neon watch` use the turn ID in the same receipt. Direct and named invocations share its lock and transcript. The prompt path is resolved from the caller's working directory.
+
 ## Local configuration
 
 An existing operator's config and receipt can be used in place. For a new configuration, identify the exact CLI, profile, editor instance, workspace, provider and model using local VS Code discovery. Set `model.thinkingLevel` to a value advertised for the model. An example with a skill plugin follows.

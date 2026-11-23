@@ -72,3 +72,44 @@ fn named_targets_bind_native_runs_and_leave_direct_commands_independent() {
     assert!(cli(&["ahp", "--help"]).status.success());
     fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn saved_target_keeps_the_receipt_location_and_chat_identity_in_one_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let registry = dir.path().join("targets.toml");
+    let definition = "[targets.work-neon]\nbackend = 'ahp'\nassignment = { config = 'config.json', receipt = 'receipt.json' }\n";
+    fs::write(&registry, definition).unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_agent-delegation"))
+            .arg("--config")
+            .arg(&registry)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let path = dir.path();
+    let target = serde_json::json!({"cli":path.join("code"), "profile":path,"instanceId":"editor","workspace":path,
+        "model":{"id":"work/model","thinkingLevel":"high"}});
+    fs::write(path.join("config.json"), target.to_string()).unwrap();
+    let receipt = serde_json::json!({"target":target,"session":"ahp-session:/saved","chat":"ahp-chat:/saved","clientId":"owner"});
+    let durable = path.join("receipt.json");
+    fs::write(&durable, receipt.to_string()).unwrap();
+    let list = run(&["targets"]);
+    assert!(list.status.success());
+    assert_eq!(
+        String::from_utf8(list.stdout).unwrap().trim(),
+        "work-neon\tahp\twork/model"
+    );
+    for args in [
+        vec!["submit"],
+        vec!["watch", "another-receipt"],
+        vec!["check", "other-profile"],
+    ] {
+        let mut call = vec!["--target", "work-neon"];
+        call.extend(args);
+        assert!(!run(&call).status.success());
+    }
+    fs::write(&registry, format!("{definition}model = 'overridden'\n")).unwrap();
+    assert!(!run(&["targets"]).status.success());
+    assert_eq!(fs::read_to_string(durable).unwrap(), receipt.to_string());
+}

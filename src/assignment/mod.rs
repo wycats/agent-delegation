@@ -206,7 +206,7 @@ impl Assignment {
         self.conn.turn = turn.clone();
         // A resuming host can request a skill as soon as it recognizes its
         // original client ID, before the reconnect response arrives.
-        if mode == "watch"
+        if matches!(mode, "watch" | "inspect")
             && let Some(path) = &self.config.target.plugin_root
         {
             self.conn.plugin = Some(Plugin::open(path)?);
@@ -386,4 +386,36 @@ pub(super) async fn run(args: &[String]) -> Result<()> {
         assignment.progress(false)?;
     }
     result
+}
+
+/// Resolve low-level named chat operations from the same files used for full turns.
+/// Assignment commands themselves load the receipt after acquiring its owner lock.
+pub(crate) fn saved_chat(
+    config_path: &Path,
+    receipt_path: &Path,
+) -> Result<crate::targets::ChatTarget> {
+    let receipt = read_json(receipt_path)?;
+    let target = Config::read(config_path, &receipt)?.target;
+    Ok(crate::targets::ChatTarget {
+        code: Some(
+            target
+                .cli
+                .into_os_string()
+                .into_string()
+                .map_err(|_| "invalid editor CLI path")?,
+        ),
+        user_data_dir: Some(
+            target
+                .profile
+                .into_os_string()
+                .into_string()
+                .map_err(|_| "invalid editor profile path")?,
+        ),
+        session: receipt["session"]
+            .as_str()
+            .ok_or("missing session")?
+            .to_owned(),
+        chat: receipt["chat"].as_str().ok_or("missing chat")?.to_owned(),
+        model: target.model.id,
+    })
 }
