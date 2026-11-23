@@ -8,7 +8,7 @@ Choose the host that owns the conversation and the account you want to use. The 
 | `claude` | A local Claude Code subprocess with first-party Claude sign-in | Steer the running process or resume its exact session |
 | `google` (experimental) | A local Antigravity CLI subprocess using your configured personal Google sign-in | Read its result or send another turn to the exact conversation |
 
-The Google adapter has fixture coverage and a real signed-out preflight check. A signed-in Gemini turn and follow-up are still unverified. The AHP client runs natively. The Claude and Google runners are embedded in the executable and use Node.js 22+ plus the respective vendor CLI on your PATH. Each channel keeps its own account, tool permissions and conversation identity. [Claude Code usage](docs/claude.md) · [Google usage and evidence](docs/google.md)
+On Windows, a named Google target completed a live text assignment and resumed the same conversation using personal Google sign-in. The AHP client runs natively. The Claude and Google runners are embedded in the executable and use Node.js 22+ plus the respective vendor CLI on your PATH. Each channel keeps its own account, tool permissions and conversation identity. [Claude Code usage](docs/claude.md) · [Google usage and evidence](docs/google.md)
 
 ## Name your targets
 
