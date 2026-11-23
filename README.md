@@ -42,6 +42,8 @@ If discovery fails, check that the `code` on your PATH belongs to the VS Code in
 
 On Windows, run the same Cargo commands and use `.\target\debug\opus-channel.exe` with PowerShell variables. Windows uses a named pipe. macOS and Linux use a filesystem Unix socket advertised by the local VS Code CLI.
 
+The original Windows client exchanged tasks and replies with a live editor session. The macOS CI test runs the CLI against a fixture over a real Unix socket and verifies the selected chat's status. Steps 2 and 3 above check the installed VS Code build and signed-in session on your Mac. [macOS test runs](https://github.com/wycats/opus-channel/actions/workflows/macos.yml)
+
 ## How another client can use the same approach
 
 1. Find the editor host PID that owns the exact session in `code agent ps --all --json`. Read the matching editor socket and connection token from `code agent endpoints` **in process**. That command's raw output contains credentials. Keep it out of logs, issues, and handoff messages.
