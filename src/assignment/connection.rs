@@ -13,6 +13,8 @@ pub(super) struct Connection {
     pub session: String,
     pub chat: String,
     pub turn: Option<String>,
+    client_id: String,
+    pub start_seq: Option<u64>,
     pub terminal: Option<&'static str>,
     pub events: u64,
     pub session_revision: u64,
@@ -56,7 +58,13 @@ impl Connection {
             request_id: 0,
             session: session.into(),
             chat: receipt["chat"].as_str().ok_or("missing chat")?.into(),
-            turn: None,
+            turn: receipt["attempt"]["turnId"].as_str().map(str::to_owned),
+            client_id: receipt["clientId"].as_str().ok_or("missing client")?.into(),
+            start_seq: if receipt["attempt"]["outcome"] == "uncertain" {
+                receipt["attempt"]["clientSeq"].as_u64()
+            } else {
+                None
+            },
             terminal: None,
             events: 0,
             session_revision: 0,
@@ -114,7 +122,7 @@ impl Connection {
                 };
                 self.send(reply).await?;
             } else if method == "action" {
-                self.observe_action(&msg["params"])?;
+                self.observe_action(&msg["params"]);
             }
             Ok(None)
         } else {
@@ -122,24 +130,33 @@ impl Connection {
         }
     }
 
-    fn observe_action(&mut self, envelope: &Value) -> Result<()> {
+    fn observe_action(&mut self, envelope: &Value) {
         let channel = &envelope["channel"];
         let slot = if channel == &self.session {
             0
         } else if channel == &self.chat {
             1
         } else {
-            return Ok(());
+            return;
         };
         let action = &envelope["action"];
         let watched =
             slot == 1 && self.turn.is_some() && action["turnId"].as_str() == self.turn.as_deref();
-        if watched && !envelope["rejectionReason"].is_null() {
-            return Err("host rejected the recorded turn");
+        let rejected = !envelope["rejectionReason"].is_null();
+        // A reconnect reply can replay this echo after a newer live event.
+        // Match the dispatch itself independently of the ordering cursor.
+        if envelope["rejectionReason"].is_string()
+            && watched
+            && action["type"] == "chat/turnStarted"
+            && envelope["origin"]["clientId"] == self.client_id
+            && self.start_seq.is_some()
+            && envelope["origin"]["clientSeq"].as_u64() == self.start_seq
+        {
+            self.terminal = Some("rejected");
         }
         if let Some(seq) = envelope["serverSeq"].as_u64() {
             if self.channel_sequences[slot].is_some_and(|previous| previous >= seq) {
-                return Ok(());
+                return;
             }
             self.channel_sequences[slot] = Some(seq);
             self.server_seq = self.server_seq.max(seq);
@@ -149,7 +166,7 @@ impl Connection {
             self.session_revision += 1;
         }
         self.last_event = json!({"type":action["type"], "at":super::now(), "turnId":action["turnId"], "toolCallId":action["toolCallId"]});
-        if watched {
+        if watched && !rejected && self.terminal != Some("rejected") {
             match action["type"].as_str() {
                 Some("chat/turnComplete") => self.terminal = Some("complete"),
                 Some("chat/turnCancelled") => self.terminal = Some("cancelled"),
@@ -157,7 +174,6 @@ impl Connection {
                 _ => {}
             }
         }
-        Ok(())
     }
 
     async fn rpc(&mut self, method: &str, params: Value) -> Result<Value> {
@@ -193,7 +209,14 @@ impl Connection {
                 "lastSeenServerSeq": self.server_seq, "subscriptions": [self.session, self.chat]
             });
             let reply = self.rpc("reconnect", resume).await?;
-            if reply.get("result").is_some() {
+            if let Some(result) = reply.get("result") {
+                if result["type"] == "replay"
+                    && let Some(actions) = result["actions"].as_array()
+                {
+                    for envelope in actions {
+                        self.observe_action(envelope);
+                    }
+                }
                 return Ok(());
             }
             if reply["error"]["code"] != -32008 {

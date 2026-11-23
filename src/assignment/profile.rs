@@ -13,7 +13,7 @@ use tempfile::NamedTempFile;
 pub(super) struct Model {
     pub id: String,
     #[serde(rename = "thinkingLevel")]
-    pub thinking: String,
+    pub thinking: Option<String>,
 }
 
 #[derive(Deserialize, PartialEq)]
@@ -58,7 +58,7 @@ impl Config {
             || !t.workspace.is_absolute()
             || t.instance_id.is_empty()
             || t.model.id.is_empty()
-            || t.model.thinking.is_empty()
+            || t.model.thinking.as_ref().is_some_and(String::is_empty)
         {
             return Err("incomplete assignment target");
         }
@@ -123,10 +123,12 @@ impl Config {
                     && (m["provider"].is_null() || m["provider"] == provider)
             })
             .ok_or("saved model is absent from the session provider catalog")?;
-        let levels = model
-            .pointer("/configSchema/properties/thinkingLevel/enum")
-            .and_then(Value::as_array);
-        if !levels.is_some_and(|levels| levels.iter().any(|v| v == &self.target.model.thinking)) {
+        if let Some(level) = &self.target.model.thinking
+            && !model
+                .pointer("/configSchema/properties/thinkingLevel/enum")
+                .and_then(Value::as_array)
+                .is_some_and(|levels| levels.iter().any(|v| v == level))
+        {
             return Err("saved reasoning level is unavailable");
         }
         let window =

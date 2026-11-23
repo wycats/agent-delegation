@@ -28,7 +28,7 @@ After an interrupted assignment, `--target work-neon inspect` and `--target work
 
 ## Local configuration
 
-An existing operator's config and receipt can be used in place. For a new configuration, identify the exact CLI, profile, editor instance, workspace, provider and model using local VS Code discovery. Set `model.thinkingLevel` to a value advertised for the model. An example with a skill plugin follows.
+An existing operator's config and receipt can be used in place. For a new configuration, identify the exact CLI, profile, editor instance, workspace, provider and model using local VS Code discovery. To require a reasoning level, set `model.thinkingLevel` to a value advertised for the model. The client checks it before starting the turn. Omit the setting in both files to use the editor's default, including for models without a reasoning control.
 
 ```json
 {
@@ -52,11 +52,13 @@ For assignments that use the editor's own guidance, omit `pluginRoot`, `pluginRe
 
 Stdout contains one JSON record per line. A terminal record includes `outcome` (`complete`, `cancelled`, or `error`), `turnId`, and `transcript`. The transcript is the private local chat snapshot. Read the entry in `turns` with that exact ID to get its response. All three are terminal outcomes, so use the record to determine whether the assignment succeeded. While the process is running, `<receipt>.status.json` contains progress metadata.
 
-The client records its turn ID and prompt hash before dispatch. A disconnect can leave delivery uncertain. After the original process exits, inspect the saved state or reconnect to that same attempt:
+The client records the turn ID, prompt hash, and client sequence in the receipt before dispatch. If the editor explicitly rejects that start, the client records `rejected` and prints the turn ID. This outcome has no transcript because the turn never started. A subsequent `watch` reports the saved rejection, and a new `submit` can start another assignment.
+
+A disconnect before confirmation leaves delivery uncertain and blocks another submission. After the original process exits, inspect the saved state or reconnect to the recorded attempt.
 
 ```sh
 agent-delegation ahp inspect "$config" "$receipt"
 agent-delegation ahp watch   "$config" "$receipt"
 ```
 
-`watch` retrieves an already completed turn or resumes observation and skill serving for the recorded active turn. It never resends a prompt. An operational failure exits with code 2 and a diagnostic on stderr. If a process crashed and left a receipt lock, establish that the original operator has stopped before removing its lock. Repeating `submit` starts a new assignment.
+`watch` retrieves an already completed turn, recognizes a replayed rejection of the exact start dispatch, or resumes observation and skill serving for the recorded active turn. It never resends a prompt. An operational failure exits with code 2 and a diagnostic on stderr. If a process crashed and left a receipt lock, establish that the original operator has stopped before removing its lock.

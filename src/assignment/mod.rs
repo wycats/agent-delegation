@@ -30,6 +30,16 @@ fn saved_outcome(state: &Value, id: &str) -> Option<&'static str> {
     }
 }
 
+fn report_rejected(receipt: &Value) {
+    println!(
+        "{}",
+        json!({
+            "outcome": "rejected", "turnId": receipt["attempt"]["turnId"],
+            "clientId": receipt["clientId"], "session": receipt["session"], "chat": receipt["chat"]
+        })
+    );
+}
+
 struct Assignment {
     config: Config,
     receipt_path: PathBuf,
@@ -39,6 +49,9 @@ struct Assignment {
 
 impl Assignment {
     fn persist(&mut self) -> Result<()> {
+        if self.conn.terminal == Some("rejected") {
+            self.receipt["attempt"]["outcome"] = "rejected".into();
+        }
         self.receipt["serverSeq"] = self.conn.server_seq.into();
         save(&self.receipt_path, &self.receipt)
     }
@@ -63,6 +76,12 @@ impl Assignment {
             .checked_add(1)
             .ok_or("invalid client sequence")?;
         self.receipt["clientSeq"] = seq.into();
+        if action["type"] == "chat/turnStarted" {
+            self.conn.turn = action["turnId"].as_str().map(str::to_owned);
+            self.conn.start_seq = Some(seq);
+            self.conn.terminal = None;
+            self.receipt["attempt"]["clientSeq"] = seq.into();
+        }
         self.persist()?;
         self.conn.dispatch(channel, seq, action).await
     }
@@ -159,6 +178,9 @@ impl Assignment {
         let mut ping = Instant::now() + Duration::from_secs(60);
         let mut events = self.conn.events;
         loop {
+            if self.conn.terminal == Some("rejected") {
+                return Ok(());
+            }
             if let Some(expected) = self.conn.terminal {
                 let state = self.conn.snapshot(chat).await?;
                 if saved_outcome(&state, turn) != Some(expected) {
@@ -203,7 +225,6 @@ impl Assignment {
             "watch" => Some(previous.clone().ok_or("no recorded attempt to watch")?),
             _ => None,
         };
-        self.conn.turn = turn.clone();
         // A resuming host can request a skill as soon as it recognizes its
         // original client ID, before the reconnect response arrives.
         if matches!(mode, "watch" | "inspect")
@@ -272,7 +293,9 @@ impl Assignment {
             );
             return Ok(());
         }
-        if let Some(ref id) = previous
+        if self.conn.terminal == Some("rejected") {
+            self.persist()?;
+        } else if let Some(ref id) = previous
             && let Some(outcome) = saved_outcome(&state, id)
         {
             self.receipt["attempt"]["outcome"] = outcome.into();
@@ -299,12 +322,21 @@ impl Assignment {
         let can_submit = self.receipt["attempt"].is_null()
             || matches!(
                 self.receipt["attempt"]["outcome"].as_str(),
-                Some("complete" | "error" | "cancelled")
+                Some("complete" | "error" | "cancelled" | "rejected")
             );
-        if mode == "submit" && (!can_submit || !state["activeTurn"].is_null()) {
-            return Err("a turn is active or a previous attempt is unresolved");
-        }
-        if mode == "watch" {
+        if mode == "submit" {
+            if !can_submit || !state["activeTurn"].is_null() {
+                return Err("a turn is active or a previous attempt is unresolved");
+            }
+            // The previous attempt is settled. Subsequent events belong to the
+            // new assignment only once its own start dispatch is recorded.
+            self.conn.turn = None;
+            self.conn.start_seq = None;
+            self.conn.terminal = None;
+        } else {
+            if self.conn.terminal == Some("rejected") {
+                return Ok(());
+            }
             if let Some(outcome) = saved_outcome(&state, &turn) {
                 return self.finish(&turn, outcome, &state);
             }
@@ -327,11 +359,15 @@ impl Assignment {
                 "promptSha256": format!("{:x}", Sha256::digest(prompt.as_bytes()))
             });
             let model = &self.config.target.model;
+            let mut wire_model = json!({"id": model.id});
+            if let Some(level) = &model.thinking {
+                wire_model["config"] = json!({"thinkingLevel": level});
+            }
             let action = json!({
                 "type": "chat/turnStarted", "turnId": turn, "startedAt": start,
                 "message": {
                     "origin": {"kind": "user"}, "text": prompt,
-                    "model": {"id": model.id, "config": {"thinkingLevel": model.thinking}}
+                    "model": wire_model
                 }
             });
             self.dispatch(&chat, action).await?;
@@ -371,6 +407,11 @@ pub(super) async fn run(args: &[String]) -> Result<()> {
     };
     let receipt = read_json(&path)?;
     let config = Config::read(Path::new(&args[1]), &receipt)?;
+    let previous_turn = receipt["attempt"]["turnId"].clone();
+    if mode == "watch" && receipt["attempt"]["outcome"] == "rejected" {
+        report_rejected(&receipt);
+        return Ok(());
+    }
     let conn = timeout(Duration::from_secs(30), Connection::open(&config, &receipt))
         .await
         .map_err(|_| "editor connection timed out")??;
@@ -384,6 +425,14 @@ pub(super) async fn run(args: &[String]) -> Result<()> {
     if mode != "check" {
         assignment.persist()?;
         assignment.progress(false)?;
+        // The host can disconnect immediately after replaying the rejected
+        // dispatch. That proof survives even if a later snapshot failed.
+        let watching_this_attempt = mode == "watch"
+            || (mode == "submit" && assignment.receipt["attempt"]["turnId"] != previous_turn);
+        if watching_this_attempt && assignment.conn.terminal == Some("rejected") {
+            report_rejected(&assignment.receipt);
+            return Ok(());
+        }
     }
     result
 }
