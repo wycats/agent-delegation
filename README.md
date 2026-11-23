@@ -45,6 +45,17 @@ The Google adapter has fixture coverage and a real signed-out preflight check. A
 
    `accepted: true` means the host accepted the message. Check `status` again for the reply. For feedback during an active turn, use `steer` with the same arguments and a new prompt file. Both commands preserve the contents of the UTF-8 file, including newlines.
 
+For a non-default VS Code installation or user-data directory, set both values in the shell used for the chat. Keep separate values for each profile.
+
+```sh
+export AGENT_DELEGATION_CODE="$CODE"
+export AGENT_DELEGATION_USER_DATA_DIR="$PROFILE"
+"$CODE" agent ps --all --json --user-data-dir "$PROFILE"
+./agent-delegation ahp status "$session" "$chat"
+```
+
+The AHP client passes the same user-data directory to session and endpoint discovery. A model ID is opaque to routing. An AHP chat using a Google model remains on that editor host even when Antigravity is installed. Only the explicit `google` command invokes Antigravity. The low-level `send` returns the host delivery receipt. A caller that serves plugin skills and collects a finished turn must keep its full-assignment implementation in control of that turn.
+
 A custom AHP model provider can advertise its own IDs. The client forwards the chosen ID unchanged. A VS Code distribution with the same discovery commands can be selected with `AGENT_DELEGATION_CODE`, for example `code-insiders`. Run the session inventory with the same CLI. On Windows use a command name on PATH or an absolute path to an executable. If discovery fails, check that the `code` on your PATH belongs to the VS Code installation that owns the session and that its `agent --help` lists both discovery commands. If the endpoint is missing or ambiguous, refresh the session inventory and select the intended chat again. To report a problem, share the error string and `code --version` with identifying details removed.
 
 On Windows x64, extract `agent-delegation-windows-x64.zip` and use `.\agent-delegation.exe` with PowerShell variables. On Linux x64, extract `agent-delegation-linux-x64.tar.gz` and run `./agent-delegation`. Windows uses a named pipe. macOS and Linux use a filesystem Unix socket advertised by the local VS Code CLI.

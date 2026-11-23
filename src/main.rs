@@ -69,14 +69,13 @@ fn pending_action(
     }))
     .map_err(|_| "invalid typed pending message")
 }
-fn code_agent() -> Result<Command, &'static str> {
+fn code_agent(cli: &str, args: &[&str], profile: Option<&str>) -> Result<Command, &'static str> {
     // A compatible distribution can expose the same two discovery commands
     // under a different executable name. No session data goes through a shell.
-    let cli = std::env::var("AGENT_DELEGATION_CODE").unwrap_or_else(|_| "code".into());
     #[cfg(windows)]
     {
         let mut command = if cli.to_ascii_lowercase().ends_with(".exe") {
-            Command::new(&cli)
+            Command::new(cli)
         } else {
             if cli.is_empty()
                 || !cli
@@ -86,16 +85,31 @@ fn code_agent() -> Result<Command, &'static str> {
                 return Err("use a CLI name on PATH or a full .exe path for AGENT_DELEGATION_CODE");
             }
             let mut cmd = Command::new("cmd.exe");
-            cmd.args(["/d", "/c", &cli]);
-            cmd
+            cmd.args(["/d", "/v:off", "/c", cli, "agent"]).args(args);
+            if let Some(profile) = profile {
+                if profile.contains(['"', '\r', '\n']) {
+                    return Err("invalid Windows profile path");
+                }
+                cmd.env("AGENT_DELEGATION_PROFILE_ARG", profile)
+                    .arg("--user-data-dir")
+                    .raw_arg("\"%AGENT_DELEGATION_PROFILE_ARG%\"");
+            }
+            cmd.kill_on_drop(true);
+            return Ok(cmd);
         };
-        command.kill_on_drop(true).arg("agent");
+        command.kill_on_drop(true).arg("agent").args(args);
+        if let Some(profile) = profile {
+            command.arg("--user-data-dir").arg(profile);
+        }
         Ok(command)
     }
     #[cfg(unix)]
     {
         let mut command = Command::new(cli);
-        command.kill_on_drop(true).arg("agent");
+        command.kill_on_drop(true).arg("agent").args(args);
+        if let Some(profile) = profile {
+            command.arg("--user-data-dir").arg(profile);
+        }
         Ok(command)
     }
 }
@@ -184,8 +198,9 @@ async fn run(args: &[String]) -> Result<(), &'static str> {
         _ => return Err(USAGE),
     }
     let session_uri = &args[1];
-    let hosts = code_agent()?
-        .args(["ps", "--all", "--json"])
+    let cli = std::env::var("AGENT_DELEGATION_CODE").unwrap_or_else(|_| "code".into());
+    let profile = std::env::var("AGENT_DELEGATION_USER_DATA_DIR").ok();
+    let hosts = code_agent(&cli, &["ps", "--all", "--json"], profile.as_deref())?
         .output()
         .await
         .map_err(|_| "host discovery failed")?;
@@ -197,8 +212,7 @@ async fn run(args: &[String]) -> Result<(), &'static str> {
             .map_err(|_| "no host inventory; check code agent ps --all --json")?,
         session_uri,
     )?;
-    let output = code_agent()?
-        .arg("endpoints")
+    let output = code_agent(&cli, &["endpoints"], profile.as_deref())?
         .output()
         .await
         .map_err(|_| "endpoint discovery failed")?;
