@@ -13,7 +13,7 @@ use tokio::{
 };
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
-const USAGE: &str = "opus-channel chats <session-uri>\nopus-channel status <session-uri> <chat-uri>\nopus-channel send|steer <session-uri> <chat-uri> <model-id> <prompt-file>";
+const USAGE: &str = "agent-delegation ahp models|chats <session-uri>\nagent-delegation ahp status <session-uri> <chat-uri>\nagent-delegation ahp send|steer <session-uri> <chat-uri> <model-id> <prompt-file>";
 
 fn matches_ack(value: &Value, chat: &str, id: &str, client_seq: i64) -> bool {
     value["action"]["id"] == id
@@ -69,20 +69,34 @@ fn pending_action(
     }))
     .map_err(|_| "invalid typed pending message")
 }
-fn code_agent() -> Command {
+fn code_agent() -> Result<Command, &'static str> {
+    // A compatible distribution can expose the same two discovery commands
+    // under a different executable name. No session data goes through a shell.
+    let cli = std::env::var("AGENT_DELEGATION_CODE").unwrap_or_else(|_| "code".into());
     #[cfg(windows)]
     {
-        let mut command = Command::new("cmd.exe");
-        command
-            .kill_on_drop(true)
-            .args(["/d", "/c", "code", "agent"]);
-        command
+        let mut command = if cli.to_ascii_lowercase().ends_with(".exe") {
+            Command::new(&cli)
+        } else {
+            if cli.is_empty()
+                || !cli
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            {
+                return Err("use a CLI name on PATH or a full .exe path for AGENT_DELEGATION_CODE");
+            }
+            let mut cmd = Command::new("cmd.exe");
+            cmd.args(["/d", "/c", &cli]);
+            cmd
+        };
+        command.kill_on_drop(true).arg("agent");
+        Ok(command)
     }
     #[cfg(unix)]
     {
-        let mut command = Command::new("code");
+        let mut command = Command::new(cli);
         command.kill_on_drop(true).arg("agent");
-        command
+        Ok(command)
     }
 }
 
@@ -159,19 +173,18 @@ async fn snapshot(client: &Client, channel: &str) -> Result<Value, &'static str>
     }
     Ok(snapshot["state"].clone())
 }
-async fn run() -> Result<(), &'static str> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.as_slice() == ["--help"] || args.as_slice() == ["-h"] {
+async fn run(args: &[String]) -> Result<(), &'static str> {
+    if args == ["--help"] || args == ["-h"] {
         println!("{USAGE}");
         return Ok(());
     }
     let mode = args.first().map(String::as_str).unwrap_or("");
     match (mode, args.len()) {
-        ("chats", 2) | ("status", 3) | ("send" | "steer", 5) => {}
+        ("chats" | "models", 2) | ("status", 3) | ("send" | "steer", 5) => {}
         _ => return Err(USAGE),
     }
     let session_uri = &args[1];
-    let hosts = code_agent()
+    let hosts = code_agent()?
         .args(["ps", "--all", "--json"])
         .output()
         .await
@@ -184,7 +197,7 @@ async fn run() -> Result<(), &'static str> {
             .map_err(|_| "no host inventory; check code agent ps --all --json")?,
         session_uri,
     )?;
-    let output = code_agent()
+    let output = code_agent()?
         .arg("endpoints")
         .output()
         .await
@@ -228,6 +241,25 @@ async fn run() -> Result<(), &'static str> {
         return Err("host did not negotiate AHP 1.0.0");
     }
     let session = snapshot(&client, session_uri).await?;
+    if mode == "models" {
+        let provider = session["provider"]
+            .as_str()
+            .ok_or("missing session provider")?;
+        let root = snapshot(&client, "ahp-root://").await?;
+        let models = root["agents"]
+            .as_array()
+            .and_then(|agents| agents.iter().find(|agent| agent["provider"] == provider))
+            .and_then(|agent| agent["models"].as_array())
+            .ok_or("host did not advertise a model catalog for this session provider")?;
+        for model in models {
+            println!(
+                "{}",
+                json!({"provider": provider, "id": model["id"], "name": model["name"]})
+            );
+        }
+        client.shutdown().await;
+        return Ok(());
+    }
     let chats = session["chats"]
         .as_array()
         .ok_or("session chat catalog missing")?;
@@ -343,7 +375,35 @@ async fn run() -> Result<(), &'static str> {
 
 #[tokio::main]
 async fn main() {
-    match timeout(Duration::from_secs(45), run()).await {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let (channel, rest) = args
+        .split_first()
+        .map(|(first, rest)| (first.as_str(), rest))
+        .unwrap_or(("--help", &[]));
+    let args = match channel {
+        "--help" | "-h" | "help" => {
+            println!(
+                "agent-delegation <ahp|claude|google> <command> [arguments]\n\n{USAGE}\nagent-delegation claude --help\nagent-delegation google --help"
+            );
+            return;
+        }
+        "claude" | "google" => {
+            // Ship the exact provider implementation inside the executable. Provider
+            // arguments stay in argv, while Node reads the module itself on stdin.
+            let script: &[u8] = match channel {
+                "claude" => include_bytes!("../providers/claude/runner.mjs"),
+                _ => include_bytes!("../providers/google/runner.mjs"),
+            };
+            let result = run_node(script, rest);
+            std::process::exit(result.unwrap_or_else(|error| {
+                eprintln!("Provider runner requires Node.js 22+ on PATH: {error}");
+                1
+            }));
+        }
+        "ahp" => rest,
+        _ => args.as_slice(), // Preserve the original positional AHP commands.
+    };
+    match timeout(Duration::from_secs(45), run(args)).await {
         Ok(Ok(())) => {}
         Ok(Err(message)) => {
             eprintln!("{message}");
@@ -354,6 +414,20 @@ async fn main() {
             std::process::exit(1)
         }
     }
+}
+
+fn run_node(script: &[u8], args: &[String]) -> std::io::Result<i32> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("node")
+        .args(["--input-type=module", "-"])
+        .args(args)
+        .stdin(Stdio::piped())
+        .spawn()?;
+    let sent = child.stdin.take().expect("piped stdin").write_all(script);
+    let status = child.wait()?;
+    sent?;
+    Ok(status.code().unwrap_or(1))
 }
 
 #[cfg(test)]

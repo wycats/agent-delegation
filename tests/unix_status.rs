@@ -11,6 +11,21 @@ use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::test]
 async fn status_reads_the_selected_chat_over_a_local_socket() {
+    let state = fixture(false).await;
+    assert_eq!(state["chat"], "ahp-chat:/fixture");
+    assert_eq!(state["status"], 1);
+}
+
+#[tokio::test]
+async fn models_lists_only_the_sessions_registered_provider() {
+    let model = fixture(true).await;
+    assert_eq!(
+        model,
+        json!({"id":"vendor/fixture", "name":"Fixture model","provider":"custom-host"})
+    );
+}
+
+async fn fixture(list_models: bool) -> Value {
     // Keep the path short enough for macOS sockaddr_un, including on hosted runners.
     let dir = std::path::Path::new("/tmp").join(format!("opus-{}", uuid::Uuid::new_v4()));
     fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
@@ -25,7 +40,12 @@ async fn status_reads_the_selected_chat_over_a_local_socket() {
     }]});
     fs::write(dir.join("hosts.json"), hosts.to_string()).unwrap();
     fs::write(dir.join("endpoints.json"), endpoints.to_string()).unwrap();
-    let cli = dir.join("code");
+    let cli_name = if list_models {
+        "alternate-editor"
+    } else {
+        "code"
+    };
+    let cli = dir.join(cli_name);
     fs::write(
         &cli,
         r#"#!/bin/sh
@@ -51,12 +71,19 @@ esac
             (
                 "subscribe",
                 session,
-                json!({"snapshot":{"resource":session,"state":{"chats":[{"resource":chat}]}}}),
+                json!({"snapshot":{"resource":session,"state":{"provider":"custom-host","chats":[{"resource":chat}]}}}),
             ),
             (
                 "subscribe",
-                chat,
-                json!({"snapshot":{"resource":chat,"state":{"status":1,"turns":[]}}}),
+                if list_models { "ahp-root://" } else { chat },
+                if list_models {
+                    json!({"snapshot":{"resource":"ahp-root://","state":{"agents":[
+                        {"provider":"other","models":[{"id":"wrong"}]},
+                        {"provider":"custom-host","models":[{"id":"vendor/fixture","name":"Fixture model"}]}
+                    ]}}})
+                } else {
+                    json!({"snapshot":{"resource":chat,"state":{"status":1,"turns":[]}}})
+                },
             ),
         ] {
             let msg = ws.next().await.unwrap().unwrap();
@@ -70,8 +97,15 @@ esac
 
     let mut paths = vec![dir.clone()];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
-    let output = Command::new(env!("CARGO_BIN_EXE_opus-channel"))
-        .args(["status", session, chat])
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_agent-delegation"));
+    if list_models {
+        cmd.args(["ahp", "models", session])
+            .env("AGENT_DELEGATION_CODE", cli_name);
+    } else {
+        cmd.args(["status", session, chat])
+            .env_remove("AGENT_DELEGATION_CODE");
+    }
+    let output = cmd
         .env("PATH", std::env::join_paths(paths).unwrap())
         .env("FIXTURE_DIR", &dir)
         .output()
@@ -83,8 +117,6 @@ esac
         String::from_utf8_lossy(&output.stderr)
     );
     server.await.unwrap();
-    let status: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(status["chat"], chat);
-    assert_eq!(status["status"], 1);
     fs::remove_dir_all(dir).unwrap();
+    serde_json::from_slice(&output.stdout).unwrap()
 }

@@ -34,25 +34,26 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - run: node --test --test-timeout=90000 providers/claude/runner.test.mjs providers/google/runner.test.mjs
       - run: cargo test --locked --release --target ${{ matrix.target }}
       - run: cargo build --locked --release --target ${{ matrix.target }}
       - name: Check and package the Unix executable
         if: runner.os != 'Windows'
         working-directory: target/${{ matrix.target }}/release
         run: |
-          ./opus-channel --help
-          tar -czf "$GITHUB_WORKSPACE/opus-channel-${{ matrix.platform }}.tar.gz" opus-channel
+          ./agent-delegation --help
+          tar -czf "$GITHUB_WORKSPACE/agent-delegation-${{ matrix.platform }}.tar.gz" agent-delegation
       - name: Check and package the Windows executable
         if: runner.os == 'Windows'
         working-directory: target/${{ matrix.target }}/release
         run: |
-          .\opus-channel.exe --help
+          .\agent-delegation.exe --help
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          Compress-Archive -Path opus-channel.exe -DestinationPath "$env:GITHUB_WORKSPACE/opus-channel-${{ matrix.platform }}.zip"
+          Compress-Archive -Path agent-delegation.exe -DestinationPath "$env:GITHUB_WORKSPACE/agent-delegation-${{ matrix.platform }}.zip"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: opus-channel-${{ matrix.platform }}
-          path: opus-channel-${{ matrix.platform }}.*
+          name: agent-delegation-${{ matrix.platform }}
+          path: agent-delegation-${{ matrix.platform }}.*
           if-no-files-found: error
 
   release:
@@ -76,7 +77,7 @@ jobs:
           git merge-base --is-ancestor HEAD origin/main
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: opus-channel-*
+          pattern: agent-delegation-*
           path: dist
           merge-multiple: true
       - name: Publish archives and checksums
@@ -84,6 +85,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          archives=(opus-channel-macos-{arm64,x64}.tar.gz opus-channel-windows-x64.zip opus-channel-linux-x64.tar.gz)
+          archives=(agent-delegation-macos-{arm64,x64}.tar.gz agent-delegation-windows-x64.zip agent-delegation-linux-x64.tar.gz)
           sha256sum "${archives[@]}" > SHA256SUMS
           gh release create "$TAG" "${archives[@]}" SHA256SUMS --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --generate-notes

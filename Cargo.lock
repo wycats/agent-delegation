@@ -3,6 +3,20 @@
 version = 4
 
 [[package]]
+name = "agent-delegation"
+version = "0.2.0"
+dependencies = [
+ "ahp",
+ "ahp-types",
+ "futures-util",
+ "libc",
+ "serde_json",
+ "tokio",
+ "tokio-tungstenite",
+ "uuid",
+]
+
+[[package]]
 name = "ahp"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -332,20 +346,6 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
-
-[[package]]
-name = "opus-channel"
-version = "0.1.0"
-dependencies = [
- "ahp",
- "ahp-types",
- "futures-util",
- "libc",
- "serde_json",
- "tokio",
- "tokio-tungstenite",
- "uuid",
-]
 
 [[package]]
 name = "parking_lot"
