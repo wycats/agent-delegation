@@ -135,11 +135,17 @@ export async function run(options, invoke = spawnSync) {
 
 async function main(argv) {
   const [cmd, ...args] = argv;
+  const targetModel = process.env.AGENT_DELEGATION_TARGET_MODEL;
   if (!cmd || cmd === '--help' || cmd === 'help') { console.log(help); return; }
   if (cmd === 'review' || cmd === 'reconcile') {
     const {values} = parseArgs({args, options:{'run-dir':{type:'string'}, note:{type:'string'}}});
     if (!values['run-dir'] || !values.note?.trim()) throw new Error(help);
     const dir = path.resolve(values['run-dir']);
+    if (targetModel) {
+      const intent = read(dir, 'intent.json');
+      if (intent.provider !== 'antigravity' || intent.model !== targetModel)
+        throw new Error('Run does not belong to the selected Google target model');
+    }
     if (cmd === 'review') {
       const receipt = read(dir, 'completion.json');
       record(dir, 'review.json', {reviewedAt:new Date().toISOString(), ok:receipt.ok, note:values.note});
@@ -162,7 +168,12 @@ async function main(argv) {
   if (cmd !== 'run') throw new Error(help);
   const options = {expect:{type:'string', multiple:true}};
   for (const key of ['cwd','model','task','run-dir','resume-from','timeout-seconds']) options[key] = {type:'string'};
-  const receipt = await run(parseArgs({args, options}).values);
+  const values = parseArgs({args, options}).values;
+  if (targetModel) {
+    if (values.model !== undefined && values.model !== targetModel) throw new Error('Model differs from selected target');
+    values.model = targetModel;
+  }
+  const receipt = await run(values);
   console.log(JSON.stringify(receipt));
   if (!receipt.ok) process.exitCode = 1;
 }

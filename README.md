@@ -10,6 +10,39 @@ Choose the host that owns the conversation and the account you want to use. The 
 
 The Google adapter has fixture coverage and a real signed-out preflight check. A signed-in Gemini turn and follow-up are still unverified. The AHP client runs natively. The Claude and Google runners are embedded in the executable and use Node.js 22+ plus the respective vendor CLI on your PATH. Each channel keeps its own account, tool permissions and conversation identity. [Claude Code usage](docs/claude.md) · [Google usage and evidence](docs/google.md)
 
+## Name your targets
+
+Save your usual destinations in `~/.config/agent-delegation/targets.toml` on macOS or Linux, or `%APPDATA%\agent-delegation\targets.toml` on Windows. On Unix, setting `XDG_CONFIG_HOME` replaces `~/.config`. You can also select a file with `AGENT_DELEGATION_CONFIG` or the global `--config PATH` option, which takes precedence. Direct channel commands work without a config file.
+
+```toml
+[targets.work-neon]
+backend = "ahp"
+code = "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
+user_data_dir = "/absolute/path/to/the/owning/profile"
+session = "REPLACE_WITH_SESSION_URI"
+chat = "REPLACE_WITH_CHAT_URI"
+model = "REPLACE_WITH_EXACT_HOST_MODEL_ID"
+
+[targets.personal-neon]
+backend = "google"
+model = "REPLACE_WITH_SLUG_FROM_AGY_MODELS"
+
+[targets.fable]
+backend = "claude"
+model = "claude-fable-5-2"
+```
+
+```sh
+agent-delegation targets
+agent-delegation --target work-neon status
+agent-delegation --target work-neon send task.txt
+agent-delegation --target personal-neon run --cwd "$PWD" --task task.txt --run-dir "$PWD/run-1"
+```
+
+An AHP target binds an existing chat to its model and owning installation. Omitting `code` selects `code` on PATH. Omitting `user_data_dir` selects that installation's default profile. A named target takes precedence over the shell's editor and profile settings. Use literal paths in TOML. The AHP client obtains fresh endpoint credentials from the editor for each command.
+
+A Claude or Google target binds the host and model. The vendor CLI supplies its signed-in account. A fresh `run` creates a conversation and records it in the specified run directory. To continue one, supply `--resume-from` and a new `--run-dir`. Several names can use the same model. The run directory identifies the particular conversation. Use `--target NAME --help` for the commands available on that host.
+
 ## On a Mac
 
 1. Download the archive for your Mac from the [latest release](https://github.com/wycats/agent-delegation/releases/latest). In Terminal, `uname -m` prints `arm64` on Apple Silicon and `x86_64` on Intel when running natively. From the directory containing the downloaded archive, run the matching command.
@@ -54,7 +87,7 @@ export AGENT_DELEGATION_USER_DATA_DIR="$PROFILE"
 ./agent-delegation ahp status "$session" "$chat"
 ```
 
-The AHP client passes the same user-data directory to session and endpoint discovery. A model ID is opaque to routing. An AHP chat using a Google model remains on that editor host even when Antigravity is installed. Only the explicit `google` command invokes Antigravity. The low-level `send` returns the host delivery receipt. A caller that serves plugin skills and collects a finished turn must keep its full-assignment implementation in control of that turn.
+The AHP client passes the same user-data directory to session and endpoint discovery. A model ID is opaque to routing. An AHP chat using a Google model remains on that editor host even when Antigravity is installed. Selecting the Google backend invokes Antigravity. The low-level `send` returns the host delivery receipt. A caller that serves plugin skills and collects a finished turn must keep its full-assignment implementation in control of that turn.
 
 A custom AHP model provider can advertise its own IDs. The client forwards the chosen ID unchanged. A VS Code distribution with the same discovery commands can be selected with `AGENT_DELEGATION_CODE`, for example `code-insiders`. Run the session inventory with the same CLI. On Windows use a command name on PATH or an absolute path to an executable. If discovery fails, check that the `code` on your PATH belongs to the VS Code installation that owns the session and that its `agent --help` lists both discovery commands. If the endpoint is missing or ambiguous, refresh the session inventory and select the intended chat again. To report a problem, share the error string and `code --version` with identifying details removed.
 

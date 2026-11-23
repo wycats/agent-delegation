@@ -1,6 +1,7 @@
 //! Attach to a chat on the local VS Code Agent Host.
 //! Discovers credentials in memory through VS Code; never writes or prints them.
 use ahp::{Client, ClientConfig, Transport, TransportError, TransportMessage};
+mod targets;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 #[cfg(unix)]
@@ -187,7 +188,7 @@ async fn snapshot(client: &Client, channel: &str) -> Result<Value, &'static str>
     }
     Ok(snapshot["state"].clone())
 }
-async fn run(args: &[String]) -> Result<(), &'static str> {
+async fn run(args: &[String], editor: Option<targets::Editor>) -> Result<(), &'static str> {
     if args == ["--help"] || args == ["-h"] {
         println!("{USAGE}");
         return Ok(());
@@ -198,8 +199,10 @@ async fn run(args: &[String]) -> Result<(), &'static str> {
         _ => return Err(USAGE),
     }
     let session_uri = &args[1];
-    let cli = std::env::var("AGENT_DELEGATION_CODE").unwrap_or_else(|_| "code".into());
-    let profile = std::env::var("AGENT_DELEGATION_USER_DATA_DIR").ok();
+    let targets::Editor { code: cli, profile } = editor.unwrap_or_else(|| targets::Editor {
+        code: std::env::var("AGENT_DELEGATION_CODE").unwrap_or_else(|_| "code".into()),
+        profile: std::env::var("AGENT_DELEGATION_USER_DATA_DIR").ok(),
+    });
     let hosts = code_agent(&cli, &["ps", "--all", "--json"], profile.as_deref())?
         .output()
         .await
@@ -389,7 +392,15 @@ async fn run(args: &[String]) -> Result<(), &'static str> {
 
 #[tokio::main]
 async fn main() {
-    let args: Vec<_> = std::env::args().skip(1).collect();
+    let call = match targets::invocation(std::env::args().skip(1).collect()) {
+        Ok(Some(call)) => call,
+        Ok(None) => return,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
+    let args = call.args;
     let (channel, rest) = args
         .split_first()
         .map(|(first, rest)| (first.as_str(), rest))
@@ -397,7 +408,7 @@ async fn main() {
     let args = match channel {
         "--help" | "-h" | "help" => {
             println!(
-                "agent-delegation <ahp|claude|google> <command> [arguments]\n\n{USAGE}\nagent-delegation claude --help\nagent-delegation google --help"
+                "agent-delegation [--config PATH] targets\nagent-delegation [--config PATH] --target NAME <command> [arguments]\nagent-delegation <ahp|claude|google> <command> [arguments]\n\n{USAGE}\nagent-delegation claude --help\nagent-delegation google --help"
             );
             return;
         }
@@ -408,7 +419,7 @@ async fn main() {
                 "claude" => include_bytes!("../providers/claude/runner.mjs"),
                 _ => include_bytes!("../providers/google/runner.mjs"),
             };
-            let result = run_node(script, rest);
+            let result = run_node(script, rest, call.native_model.as_deref());
             std::process::exit(result.unwrap_or_else(|error| {
                 eprintln!("Provider runner requires Node.js 22+ on PATH: {error}");
                 1
@@ -417,7 +428,7 @@ async fn main() {
         "ahp" => rest,
         _ => args.as_slice(), // Preserve the original positional AHP commands.
     };
-    match timeout(Duration::from_secs(45), run(args)).await {
+    match timeout(Duration::from_secs(45), run(args, call.editor)).await {
         Ok(Ok(())) => {}
         Ok(Err(message)) => {
             eprintln!("{message}");
@@ -430,10 +441,15 @@ async fn main() {
     }
 }
 
-fn run_node(script: &[u8], args: &[String]) -> std::io::Result<i32> {
+fn run_node(script: &[u8], args: &[String], model: Option<&str>) -> std::io::Result<i32> {
     use std::io::Write;
     use std::process::{Command, Stdio};
-    let mut child = Command::new("node")
+    let mut node = Command::new("node");
+    node.env_remove("AGENT_DELEGATION_TARGET_MODEL");
+    if let Some(id) = model {
+        node.env("AGENT_DELEGATION_TARGET_MODEL", id);
+    }
+    let mut child = node
         .args(["--input-type=module", "-"])
         .args(args)
         .stdin(Stdio::piped())

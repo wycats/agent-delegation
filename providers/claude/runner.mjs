@@ -962,6 +962,17 @@ async function main(argv) {
   const [cmd, ...rest] = argv;
   if (!cmd || cmd === '--help' || cmd === 'help') { process.stdout.write(HELP); return EXIT.ok; }
   const o = parseArgs(cmd, rest);
+  const targetModel = process.env.AGENT_DELEGATION_TARGET_MODEL;
+  if (targetModel) {
+    if (cmd === 'run') {
+      if (o.model !== undefined && o.model !== targetModel) throw new UsageError('Model differs from selected target');
+      o.model = targetModel;
+    } else {
+      const {intent} = loadRun(absPath(need(o, 'run-dir'), '--run-dir'));
+      if (!intent.sessionId || intent.config?.model !== targetModel || intent.model !== targetModel)
+        throw new UsageError('Run does not belong to the selected Claude target model');
+    }
+  }
   return { run: cmdRun, steer: cmdSteer, status: cmdStatus, wait: cmdWait, review: cmdReview, reconcile: cmdReconcile }[cmd](o);
 }
 

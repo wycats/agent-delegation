@@ -125,16 +125,27 @@ esac
     let mut paths = vec![dir.clone()];
     paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_agent-delegation"));
-    cmd.args(["ahp", mode, session])
-        .env("AGENT_DELEGATION_CODE", cli)
-        .env("AGENT_DELEGATION_USER_DATA_DIR", profile);
-    if !list_models {
-        cmd.arg(chat);
+    if list_models {
+        cmd.args(["ahp", mode, session])
+            .env("AGENT_DELEGATION_CODE", &cli)
+            .env("AGENT_DELEGATION_USER_DATA_DIR", &profile);
+    } else {
+        let config = dir.join("targets.toml");
+        let quoted_model = serde_json::to_string(&requested_model).unwrap();
+        fs::write(&config, format!(
+            "[targets.work]\nbackend = 'ahp'\ncode = '{}'\nuser_data_dir = '{}'\nsession = '{session}'\nchat = '{chat}'\nmodel = {quoted_model}\n[targets.personal]\nbackend = 'google'\nmodel = 'gemini-test'\n",
+            cli.display(), profile.display()
+        )).unwrap();
+        cmd.arg("--config")
+            .arg(&config)
+            .args(["--target", "work", mode])
+            .env("AGENT_DELEGATION_CODE", "/missing-editor")
+            .env("AGENT_DELEGATION_USER_DATA_DIR", "/wrong-profile");
     }
     if mode == "send" {
         let prompt = dir.join("prompt.txt");
         fs::write(&prompt, "fixture prompt\n").unwrap();
-        cmd.arg(requested_model).arg(prompt);
+        cmd.arg(prompt);
     }
     let output = cmd
         .env("PATH", std::env::join_paths(paths).unwrap())
