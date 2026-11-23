@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 
 const [scenarioPath, ...args] = process.argv.slice(2);
 const sc = JSON.parse(fs.readFileSync(scenarioPath, 'utf8'));
+if (sc.ignoreSigterm) process.on('SIGTERM', () => {});
 if (sc.argsLog) fs.appendFileSync(sc.argsLog, JSON.stringify({ argv: args, cwd: process.cwd(), pid: process.pid,
   backgroundTasksDisabled: process.env.CLAUDE_CODE_DISABLE_BACKGROUND_TASKS ?? null }) + '\n');
 

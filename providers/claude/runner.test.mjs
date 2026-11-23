@@ -19,7 +19,6 @@ fs.mkdirSync(LOCKS, { recursive: true });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const readJson = p => JSON.parse(fs.readFileSync(p, 'utf8'));
 const exists = p => fs.existsSync(p);
-const pidAlive = pid => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
 
 async function waitFor(fn, ms = 10_000, what = 'condition') {
   const end = Date.now() + ms;
@@ -427,11 +426,24 @@ test('run deadline kills the child; wait timeout leaves the owner running and re
   const taskId = readJson(path.join(live, 'intent.json')).taskMessageId;
   assert.equal(events(live).filter(e => e.uuid === taskId).length, 1);
 
-  const stuck = setup('stuck', { ignoreStdinEnd: true });
+  const stuck = setup('stuck', { ignoreStdinEnd: true, ignoreSigterm: true });
   const sd = stuck.runDir();
   const rs = await startRun(stuck, sd, 'SAY hi', ['--shutdown-seconds', '1']).done;
   assert.equal(rs.code, 1);
   assert.ok(failureCodes(sd).includes('shutdown-timeout'));
+  if (process.platform !== 'win32') assert.equal(completion(sd).exit.signal, 'SIGKILL');
+  assert.equal((await run1(['status', '--run-dir', sd])).last.child.alive, false);
+});
+
+test('workspace directory aliases identify the same workspace on initialization and resume', async () => {
+  const ctx = setup('workspace-alias');
+  const alias = path.join(ctx.base, 'alias');
+  fs.symlinkSync(ctx.cwd, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const first = ctx.runDir();
+  assert.equal((await startRun({...ctx, cwd:alias}, first, 'SAY first').done).code, 0);
+  const resumed = await run1(['run', '--run-dir', ctx.runDir(), '--resume-from', first,
+    '--cwd', ctx.cwd, '--task', ctx.task('SAY resumed')]);
+  assert.equal(resumed.code, 0, JSON.stringify(resumed.last));
 });
 
 test('dead owner is visible, rejects steering, and needs explicit reconciliation', async () => {
@@ -459,11 +471,11 @@ test('dead owner is visible, rejects steering, and needs explicit reconciliation
   let rc = await run1(['reconcile', '--run-dir', runDir, '--note', 'owner killed in test']);
   if (rc.code === 2) {
     assert.match(rc.last.error, /still alive/);
-    await waitFor(() => !pidAlive(st.childPid), 15_000, 'orphaned child exit');
+    await waitFor(async () => !(await run1(['status', '--run-dir', runDir])).last.child.alive, 15_000, 'orphaned child exit');
     rc = await run1(['reconcile', '--run-dir', runDir, '--note', 'owner killed in test; child exited']);
   }
   assert.equal(rc.code, 0, JSON.stringify(rc.last));
-  assert.ok(!pidAlive(st.childPid), 'successful reconciliation requires the child to have exited');
+  assert.equal((await run1(['status', '--run-dir', runDir])).last.child.alive, false);
   assert.ok(!exists(lockFile));
   const c = completion(runDir);
   assert.equal(c.ok, false);

@@ -104,6 +104,11 @@ function samePath(a, b) {
   return n(a) === n(b);
 }
 
+function sameWorkspace(a, b) {
+  try { return samePath(fs.realpathSync(a), fs.realpathSync(b)); }
+  catch { return false; }
+}
+
 function readTaskText(file) {
   let buf;
   try { buf = fs.readFileSync(path.resolve(file)); } catch (e) { throw new UsageError(`cannot read task ${file}: ${e.code}`); }
@@ -160,7 +165,12 @@ function readJson(file) {
 
 function pidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
-  try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; }
+  try { process.kill(pid, 0); } catch (e) { return e.code === 'EPERM'; }
+  if (process.platform === 'linux') {
+    try { return !/^State:\s+Z/m.test(fs.readFileSync(`/proc/${pid}/status`, 'utf8')); }
+    catch (e) { return e.code !== 'ENOENT' || !fs.existsSync('/proc/self/status'); }
+  }
+  return true;
 }
 
 // Short-lived cross-process mutex serializing mailbox enqueue against the owner's
@@ -324,7 +334,8 @@ async function cmdRun(o) {
       claudeBin: o['claude-bin'], lockDir: o['lock-dir'], backgroundTasks: o['background-tasks'] };
     for (const [k, v] of Object.entries(given)) {
       if (v === undefined) continue;
-      const same = (k === 'cwd' || k === 'lockDir' || k === 'claudeBin') ? samePath(v, config[k]) : v === config[k];
+      const same = k === 'cwd' ? sameWorkspace(v, config.cwd)
+        : (k === 'lockDir' || k === 'claudeBin') ? samePath(v, config[k]) : v === config[k];
       if (!same) throw new UsageError(`resume inherits ${k}=${config[k]} from the predecessor; got ${v}`);
     }
     if (o['claude-prefix-arg'] && JSON.stringify(prefix) !== JSON.stringify(config.claudePrefixArgs))
@@ -603,7 +614,7 @@ class Owner {
       this.save();
       if (ev.model !== this.model) return this.abort('model-mismatch', `init model ${ev.model}, expected ${this.model}`);
       if (ev.apiKeySource !== undefined && ev.apiKeySource !== 'none') return this.abort('api-key-source', `init apiKeySource ${ev.apiKeySource}`);
-      if (typeof ev.cwd === 'string' && !samePath(ev.cwd, this.intent.cwd)) return this.abort('cwd-mismatch', `init cwd ${ev.cwd}`);
+      if (typeof ev.cwd === 'string' && !sameWorkspace(ev.cwd, this.intent.cwd)) return this.abort('cwd-mismatch', `init cwd ${ev.cwd}`);
     } else if (ev.type === 'assistant') {
       if (ev.message?.model !== this.model) return this.abort('model-mismatch', `assistant model ${ev.message?.model}, expected ${this.model}`);
     } else if (ev.type === 'system' && ev.subtype === 'task_notification') {
@@ -731,7 +742,12 @@ class Owner {
       if (this.state.exit) return;
       this.fail('shutdown-timeout', `child did not exit within ${this.intent.bounds.shutdownSeconds}s of closing; killed`);
       this.killChild();
-      this.timers.shutdown2 = setTimeout(this.guard(() => { this.fail('child-exit-unconfirmed', 'child still not exited after kill'); this.finalize(); }), 5000);
+      this.timers.shutdown2 = setTimeout(this.guard(() => {
+        if (this.state.exit) return;
+        this.log('kill', { pid: this.child?.pid, signal: 'SIGKILL' });
+        this.child?.kill('SIGKILL');
+        // The exit and stdio handlers finalize and release ownership.
+      }), 5000);
     }), ms);
   }
 
