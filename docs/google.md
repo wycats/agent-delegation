@@ -1,4 +1,4 @@
-# Delegate through Google Antigravity (preview)
+# Delegate through Google Antigravity (experimental)
 
 For personal Google sign-in, the host is Antigravity CLI (`agy`). Google moved Free, Pro and Ultra individual accounts from the older Gemini CLI to Antigravity. A Gemini model registered in an AHP chat is also available through the AHP channel using that chat's provider account. Choose the channel according to which conversation, permissions and account should own the task. [Google's transition announcement](https://github.com/google-gemini/gemini-cli/discussions/28017) · [Antigravity authentication](https://antigravity.google/docs/install?tab=cli)
 

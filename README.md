@@ -6,9 +6,9 @@ Choose the host that owns the conversation and the account you want to use. The 
 | --- | --- | --- |
 | `ahp` | An existing VS Code Agent Host chat, using its registered provider and model catalog | Read status, queue a task, or steer the active turn |
 | `claude` | A local Claude Code subprocess with first-party Claude sign-in | Steer the running process or resume its exact session |
-| `google` (preview) | A local Antigravity CLI subprocess using your configured personal Google sign-in | Read its result or send another turn to the exact conversation |
+| `google` (experimental) | A local Antigravity CLI subprocess using your configured personal Google sign-in | Read its result or send another turn to the exact conversation |
 
-The AHP client runs natively. The Claude and Google runners are embedded in the executable and use Node.js 22+ plus the respective vendor CLI on your PATH. Each channel keeps its own account, tool permissions and conversation identity. [Claude Code usage](docs/claude.md) · [Google usage and evidence](docs/google.md)
+The Google adapter has fixture coverage and a real signed-out preflight check. A signed-in Gemini turn and follow-up are still unverified. The AHP client runs natively. The Claude and Google runners are embedded in the executable and use Node.js 22+ plus the respective vendor CLI on your PATH. Each channel keeps its own account, tool permissions and conversation identity. [Claude Code usage](docs/claude.md) · [Google usage and evidence](docs/google.md)
 
 ## On a Mac
 
