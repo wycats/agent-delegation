@@ -1,0 +1,19 @@
+[package]
+name = "opus-channel"
+version = "0.1.0"
+edition = "2024"
+description = "A headless AHP client for an existing VS Code agent chat"
+repository = "https://github.com/wycats/opus-channel"
+publish = false
+
+[dependencies]
+ahp = "=1.0.0"
+ahp-types = "=1.0.0"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.29"
+futures-util = "0.3"
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
