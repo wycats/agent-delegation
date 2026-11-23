@@ -16,6 +16,12 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 serde = { version = "1.0.229", features = ["derive"] }
 toml = { version = "1.2.2", default-features = false, features = ["parse", "serde", "std"] }
+base64 = "0.22"
+sha2 = "0.10"
+url = "2"
+tempfile = "3"
+cap-std = "4"
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

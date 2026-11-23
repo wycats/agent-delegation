@@ -4,7 +4,7 @@ Choose the host that owns the conversation and the account you want to use. The 
 
 | Channel | Where the work runs | Following up |
 | --- | --- | --- |
-| `ahp` | An existing VS Code Agent Host chat, using its registered provider and model catalog | Read status, queue a task, or steer the active turn |
+| `ahp` | An existing VS Code Agent Host chat, using its registered provider and model catalog | Read status, queue or steer a message, or run and recover a full assignment |
 | `claude` | A local Claude Code subprocess with first-party Claude sign-in | Steer the running process or resume its exact session |
 | `google` (experimental) | A local Antigravity CLI subprocess using your configured personal Google sign-in | Read its result or send another turn to the exact conversation |
 
@@ -87,7 +87,7 @@ export AGENT_DELEGATION_USER_DATA_DIR="$PROFILE"
 ./agent-delegation ahp status "$session" "$chat"
 ```
 
-The AHP client passes the same user-data directory to session and endpoint discovery. A model ID is opaque to routing. An AHP chat using a Google model remains on that editor host even when Antigravity is installed. Selecting the Google backend invokes Antigravity. The low-level `send` returns the host delivery receipt. A caller that serves plugin skills and collects a finished turn must keep its full-assignment implementation in control of that turn.
+The AHP client passes the same user-data directory to session and endpoint discovery. A model ID is opaque to routing. An AHP chat using a Google model remains on that editor host even when Antigravity is installed. Selecting the Google backend invokes Antigravity. The low-level `send` returns the host delivery receipt. For a full assignment, `ahp submit` keeps the native Rust client connected, serves configured skills and returns the recorded turn’s result. [Full assignment setup and recovery](docs/ahp-assignments.md)
 
 A custom AHP model provider can advertise its own IDs. The client forwards the chosen ID unchanged. A VS Code distribution with the same discovery commands can be selected with `AGENT_DELEGATION_CODE`, for example `code-insiders`. Run the session inventory with the same CLI. On Windows use a command name on PATH or an absolute path to an executable. If discovery fails, check that the `code` on your PATH belongs to the VS Code installation that owns the session and that its `agent --help` lists both discovery commands. If the endpoint is missing or ambiguous, refresh the session inventory and select the intended chat again. To report a problem, share the error string and `code --version` with identifying details removed.
 
