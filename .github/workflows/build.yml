@@ -11,7 +11,28 @@ permissions:
   contents: read
 
 jobs:
+  settings-assets:
+    name: Build settings UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+      - run: npm ci
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: settings-assets
+          path: ui/build/
+          if-no-files-found: error
+
   build:
+    needs: settings-assets
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -34,21 +55,37 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: settings-assets
+          path: ui/build
       - run: node --test --test-timeout=90000 providers/claude/runner.test.mjs providers/google/runner.test.mjs
       - run: cargo test --locked --release --target ${{ matrix.target }}
       - run: cargo build --locked --release --target ${{ matrix.target }}
+      - name: Install browser for the settings acceptance test
+        if: runner.os == 'Linux'
+        working-directory: ui
+        run: |
+          npm ci
+          npm exec -- playwright install --with-deps --only-shell chromium
+      - name: Rename a saved AHP target in Chromium and check it through the CLI
+        if: runner.os == 'Linux'
+        run: cargo test --locked --release --target ${{ matrix.target }} --test assignments settings_renames_saved_ahp_target_without_rebinding_it -- --exact --ignored
       - name: Check and package the Unix executable
         if: runner.os != 'Windows'
         working-directory: target/${{ matrix.target }}/release
         run: |
           ./agent-delegation --help
           ./agent-delegation ahp --help | grep -F 'ahp submit'
+          node "$GITHUB_WORKSPACE/tests/settings-smoke.mjs" ./agent-delegation
           tar -czf "$GITHUB_WORKSPACE/agent-delegation-${{ matrix.platform }}.tar.gz" agent-delegation
       - name: Check and package the Windows executable
         if: runner.os == 'Windows'
         working-directory: target/${{ matrix.target }}/release
         run: |
           .\agent-delegation.exe --help
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          node "$env:GITHUB_WORKSPACE/tests/settings-smoke.mjs" .\agent-delegation.exe
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Compress-Archive -Path agent-delegation.exe -DestinationPath "$env:GITHUB_WORKSPACE/agent-delegation-${{ matrix.platform }}.zip"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

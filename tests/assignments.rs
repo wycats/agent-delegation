@@ -29,7 +29,7 @@ struct Fixture {
     dir: PathBuf,
     listener: UnixListener,
     plugin_uri: String,
-    named: bool,
+    target_name: Option<&'static str>,
     advertises_reasoning: bool,
 }
 
@@ -85,7 +85,7 @@ esac
             dir,
             listener,
             plugin_uri,
-            named: false,
+            target_name: None,
             advertises_reasoning: true,
         }
     }
@@ -100,7 +100,7 @@ esac
         .unwrap();
         fs::set_permissions(agy, fs::Permissions::from_mode(0o700)).unwrap();
         fs::write(fixture.dir.join("targets.toml"), "[targets.work-neon]\nbackend = 'ahp'\nassignment = { config = 'config', receipt = 'receipt' }\n").unwrap();
-        fixture.named = true;
+        fixture.target_name = Some("work-neon");
         fixture
     }
 
@@ -110,10 +110,10 @@ esac
 
     fn command(&self, mode: &str) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_agent-delegation"));
-        if self.named {
+        if let Some(name) = self.target_name {
             cmd.arg("--config")
                 .arg(self.dir.join("targets.toml"))
-                .args(["--target", "work-neon", mode]);
+                .args(["--target", name, mode]);
         } else {
             cmd.args(["ahp", mode])
                 .arg(self.dir.join("config"))
@@ -218,7 +218,11 @@ esac
                                     .map(|id| json!({"id":id}))
                                     .unwrap_or_default()
                             };
-                            json!({"status":1,"workingDirectories":[workspace.as_str()],"activeTurn":active,"turns":if completed && !matches!(end,End::Mismatch) {json!([{"id":started,"state":outcome,"responseParts":[{"kind":"markdown","content":"fixture answer"}]}])}else{json!([])}})
+                            let mut chat = json!({"status":1,"workingDirectories":[workspace.as_str()],"activeTurn":active,"turns":if completed && !matches!(end,End::Mismatch) {json!([{"id":started,"state":outcome,"responseParts":[{"kind":"markdown","content":"fixture answer"}]}])}else{json!([])}});
+                            if mode == "check" && matches!(end, End::Check) {
+                                chat["turns"] = json!([{"id":"prior-turn","state":"complete","message":{"model":{"id":MODEL}}}]);
+                            }
+                            chat
                         }
                         _ => panic!("unexpected channel"),
                     };
@@ -419,6 +423,79 @@ async fn named_neon_assignment_serves_skills_after_waiting_and_saves_the_result_
     );
     assert!(!f.dir.join("receipt.lock").exists());
     assert!(!f.dir.join("agy-calls").exists());
+}
+
+#[tokio::test]
+#[ignore = "requires the UI's Playwright dev dependency and Chromium; run by Linux CI"]
+async fn settings_renames_saved_ahp_target_without_rebinding_it() {
+    let mut fixture = Fixture::named();
+    let config = fixture.dir.join("config");
+    let receipt = fixture.dir.join("receipt");
+    let before = (fs::read(&config).unwrap(), fs::read(&receipt).unwrap());
+    let registry = fixture.dir.join("targets.toml");
+    let mut settings = Command::new(env!("CARGO_BIN_EXE_agent-delegation"))
+        .args(["--config"])
+        .arg(&registry)
+        .args(["settings", "--no-open"])
+        .env("FIXTURE", &fixture.dir)
+        .env("PATH", &fixture.dir)
+        .stdout(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut lines = BufReader::new(settings.stdout.take().unwrap()).lines();
+    let url = timeout(Duration::from_secs(10), lines.next_line())
+        .await
+        .expect("settings startup timed out")
+        .unwrap()
+        .expect("settings exited");
+    let mut browser = Command::new("node");
+    browser
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/ui/tests/rename-target.mjs"
+        ))
+        .env("SETTINGS_TEST_URL", url)
+        .kill_on_drop(true);
+    assert!(
+        timeout(Duration::from_secs(60), browser.status())
+            .await
+            .expect("browser test timed out")
+            .unwrap()
+            .success()
+    );
+    settings.kill().await.unwrap();
+
+    let targets: toml::Table = fs::read_to_string(registry).unwrap().parse().unwrap();
+    let named = targets["targets"].as_table().unwrap();
+    assert!(!named.contains_key("work-neon"));
+    assert_eq!(named["renamed-neon"]["backend"].as_str(), Some("ahp"));
+    assert_eq!(
+        named["renamed-neon"]["assignment"]["config"].as_str(),
+        Some("config")
+    );
+    assert_eq!(
+        named["renamed-neon"]["assignment"]["receipt"].as_str(),
+        Some("receipt")
+    );
+    fixture.target_name = Some("renamed-neon");
+    let (code, records) = fixture.invoke("check", End::Check, None).await;
+    assert_eq!(code, 0);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0]["lastModelId"], MODEL);
+    assert_eq!(records[0]["model"], MODEL);
+    assert_eq!(records[0]["chat"], CHAT);
+    assert_eq!(records[0]["thinkingLevel"], "high");
+    assert_eq!(records[0]["turnActive"], false);
+    assert_eq!(
+        fixture.receipt()["target"]["model"]["thinkingLevel"],
+        "high"
+    );
+    assert_eq!(
+        (fs::read(config).unwrap(), fs::read(receipt).unwrap()),
+        before
+    );
+    assert!(!fixture.dir.join("agy-calls").exists());
 }
 
 #[tokio::test]

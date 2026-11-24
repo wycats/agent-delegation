@@ -12,6 +12,12 @@ On Windows, a named Google target completed a live text assignment and resumed t
 
 ## Name your targets
 
+Run `agent-delegation settings` to open the target editor in your browser. The page shows which TOML file you’re editing. To select a different file, run `agent-delegation --config PATH settings`. You can also create your first target there.
+
+Choose Claude Code or Google Antigravity and enter the host’s model ID. For a VS Code chat, select its editor and profile, discover sessions, then pick the chat and model from that session. For a saved assignment, enter the existing config and receipt paths. Renaming the target edits its name in the TOML file. **Check** verifies an existing VS Code binding without sending a message.
+
+The executable serves the embedded page on a temporary loopback port. Use `settings --no-open` to print its private launch URL. Close the session from the page or stop the command in the terminal. The server also expires after 15 minutes without an authenticated request.
+
 Save your usual destinations in `~/.config/agent-delegation/targets.toml` on macOS or Linux, or `%APPDATA%\agent-delegation\targets.toml` on Windows. On Unix, setting `XDG_CONFIG_HOME` replaces `~/.config`. You can also select a file with `AGENT_DELEGATION_CONFIG` or the global `--config PATH` option, which takes precedence. Direct channel commands work without a config file.
 
 ```toml
@@ -106,7 +112,7 @@ The original Windows client exchanged tasks and replies with a live editor sessi
 
 Every pull request targeting `main` and every push to `main` tests, builds and runs the release executable on all four platforms. Download a specific commit's archive from its completed Actions run. For public downloads, use the versioned GitHub Release. Each release includes `SHA256SUMS` for checking the downloaded archives.
 
-To build from a source checkout with stable Rust, run `cargo test --locked` followed by `cargo build --release --locked`. The executable is under `target/release/`.
+To build from a source checkout, use Node.js 24 and run `npm ci` followed by `npm run build` in `ui/`. From the repository root, run `cargo test --locked` and `cargo build --release --locked` with stable Rust. The executable under `target/release/` contains the compiled settings page. Rebuild the page before compiling Rust after UI changes.
 
 To cut a release, bump the package version in `Cargo.toml`, update `Cargo.lock`, and merge the change into `main`. After all four platform builds pass, GitHub Actions tags that commit and publishes the archives and checksums together. Merges that keep the current version produce CI artifacts only. A manually pushed matching `vX.Y.Z` tag on a commit in `main` also triggers publication.
 

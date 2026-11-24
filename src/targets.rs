@@ -3,7 +3,7 @@ use crate::invocation::{
     UsageError,
 };
 use ahp_types::state::PendingMessageKind;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     env, fs,
@@ -12,40 +12,55 @@ use std::{
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Config {
-    targets: BTreeMap<String, Target>,
+pub(crate) struct Config {
+    pub(crate) targets: BTreeMap<String, Target>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "backend", rename_all = "lowercase", deny_unknown_fields)]
-enum Target {
+pub(crate) enum Target {
     Ahp(AhpTarget),
     Claude { model: String },
     Google { model: String },
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(untagged, deny_unknown_fields)]
-enum AhpTarget {
+pub(crate) enum AhpTarget {
     Saved { assignment: AssignmentFiles },
     Chat(ChatTarget),
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct AssignmentFiles {
-    config: PathBuf,
-    receipt: PathBuf,
+pub(crate) struct AssignmentFiles {
+    pub(crate) config: PathBuf,
+    pub(crate) receipt: PathBuf,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ChatTarget {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub user_data_dir: Option<String>,
     pub session: String,
     pub chat: String,
     pub model: String,
+}
+
+impl Config {
+    pub(crate) fn read(path: &Path) -> Result<Self, String> {
+        let source =
+            fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        Self::parse(path, &source)
+    }
+
+    pub(crate) fn parse(path: &Path, source: &str) -> Result<Self, String> {
+        toml::from_str(source)
+            .map_err(|e: toml::de::Error| format!("invalid {}: {}", path.display(), e.message()))
+    }
 }
 
 impl Target {
@@ -65,7 +80,11 @@ impl Target {
         }
     }
 
-    fn resolve(&self, args: &[String], directory: &Path) -> Result<Invocation, UsageError> {
+    pub(crate) fn resolve(
+        &self,
+        args: &[String],
+        directory: &Path,
+    ) -> Result<Invocation, UsageError> {
         if args.is_empty() {
             return Err("a target needs a command".into());
         }
@@ -88,7 +107,7 @@ fn provider_args(args: &[String], model: Option<&String>) -> Result<ProviderArgs
 }
 
 impl AssignmentFiles {
-    fn chat(&self, directory: &Path) -> Result<ChatTarget, String> {
+    pub(crate) fn chat(&self, directory: &Path) -> Result<ChatTarget, String> {
         crate::assignment::saved_chat(
             &directory.join(&self.config),
             &directory.join(&self.receipt),
@@ -287,6 +306,18 @@ pub fn invocation(args: Vec<String>) -> Result<Option<Invocation>, UsageError> {
         }
         rest = remaining;
     }
+    if name.is_none() && rest.first().is_some_and(|verb| verb == "settings") {
+        let open_browser = match &rest[1..] {
+            [] => true,
+            [flag] if flag == "--no-open" => false,
+            [flag] if flag == "--help" || flag == "-h" => {
+                return Ok(Some(Invocation::Help(HelpTopic::Settings)));
+            }
+            _ => return Err("usage: agent-delegation [--config PATH] settings [--no-open]".into()),
+        };
+        let path = config_path(config)?;
+        return Ok(Some(Invocation::Settings { path, open_browser }));
+    }
     if name.is_none() && rest != ["targets"] {
         if config.is_some() || rest.first().is_some_and(|arg| arg == "targets") {
             return Err(
@@ -296,10 +327,7 @@ pub fn invocation(args: Vec<String>) -> Result<Option<Invocation>, UsageError> {
         return direct(rest).map(Some);
     }
     let path = config_path(config)?;
-    let source =
-        fs::read_to_string(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let config: Config = toml::from_str(&source)
-        .map_err(|e: toml::de::Error| format!("invalid {}: {}", path.display(), e.message()))?;
+    let config = Config::read(&path)?;
     let directory = path.parent().unwrap_or(Path::new("."));
     if let Some(name) = name {
         let target = config
