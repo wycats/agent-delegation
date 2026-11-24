@@ -42,6 +42,7 @@ jobs:
         working-directory: target/${{ matrix.target }}/release
         run: |
           ./agent-delegation --help
+          ./agent-delegation ahp --help | grep -F 'ahp submit'
           tar -czf "$GITHUB_WORKSPACE/agent-delegation-${{ matrix.platform }}.tar.gz" agent-delegation
       - name: Check and package the Windows executable
         if: runner.os == 'Windows'
@@ -56,25 +57,50 @@ jobs:
           path: agent-delegation-${{ matrix.platform }}.*
           if-no-files-found: error
 
-  release:
-    name: Publish release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: build
+  release-version:
+    name: Check release version
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      TAG: ${{ github.ref_name }}
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Check the tagged version and commit
+      - id: version
+        env:
+          BEFORE: ${{ github.event.before }}
         run: |
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
-          test "$TAG" = "v$version"
-          git merge-base --is-ancestor HEAD origin/main
+          package_version() {
+            git show "$1:Cargo.toml" | python3 -c 'import sys, tomllib; print(tomllib.load(sys.stdin.buffer)["package"]["version"])'
+          }
+          version=$(package_version HEAD)
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            test "$GITHUB_REF_NAME" = "v$version"
+            git merge-base --is-ancestor HEAD origin/main
+          else
+            previous=$(package_version "$BEFORE")
+            if [[ "$version" == "$previous" ]]; then exit 0; fi
+          fi
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Publish release
+    needs: [build, release-version]
+    if: needs.release-version.outputs.tag != ''
+    runs-on: ubuntu-latest
+    concurrency: publish-${{ needs.release-version.outputs.tag }}
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.release-version.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: agent-delegation-*
@@ -82,9 +108,18 @@ jobs:
           merge-multiple: true
       - name: Publish archives and checksums
         working-directory: dist
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           archives=(agent-delegation-macos-{arm64,x64}.tar.gz agent-delegation-windows-x64.zip agent-delegation-linux-x64.tar.gz)
           sha256sum "${archives[@]}" > SHA256SUMS
-          gh release create "$TAG" "${archives[@]}" SHA256SUMS --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --generate-notes
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            test "$(git rev-parse "refs/tags/$TAG^{commit}")" = "$GITHUB_SHA"
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" --silent
+          fi
+          if draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft); then
+            if [[ "$draft" == false ]]; then exit 0; fi
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" --generate-notes --draft
+          fi
+          gh release upload "$TAG" "${archives[@]}" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
