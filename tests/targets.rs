@@ -38,6 +38,23 @@ fn named_targets_bind_native_runs_and_leave_direct_commands_independent() {
             "{message}"
         );
     }
+    // Direct provider invocations inherit no model binding, including when a
+    // caller happens to have the internal runner variable in its environment.
+    for backend in ["google", "claude"] {
+        let run = |ambient: bool| {
+            let mut cmd = Command::new(env!("CARGO_BIN_EXE_agent-delegation"));
+            cmd.args([backend, "run", "--model", "another-model"])
+                .env_remove("AGENT_DELEGATION_TARGET_MODEL");
+            if ambient {
+                cmd.env("AGENT_DELEGATION_TARGET_MODEL", "ambient");
+            }
+            cmd.output().unwrap()
+        };
+        let clean = run(false);
+        let ambient = run(true);
+        assert!(!clean.status.success());
+        assert_eq!(clean, ambient);
+    }
     fs::write(
         dir.join("intent.json"),
         r#"{"provider":"antigravity","model":"claude-test"}"#,
@@ -88,6 +105,13 @@ fn saved_target_keeps_the_receipt_location_and_chat_identity_in_one_place() {
             .unwrap()
     };
     let path = dir.path();
+    let help = run(&["--target", "work-neon", "help"]);
+    assert!(help.status.success());
+    assert!(
+        String::from_utf8(help.stdout)
+            .unwrap()
+            .contains("submit <prompt-file>")
+    );
     let target = serde_json::json!({"cli":path.join("code"), "profile":path,"instanceId":"editor","workspace":path,
         "model":{"id":"work/model","thinkingLevel":"high"}});
     fs::write(path.join("config.json"), target.to_string()).unwrap();
