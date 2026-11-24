@@ -57,5 +57,6 @@ try {
     await closed;
   }
 } finally {
-  await rm(dir, { recursive: true, force: true });
+  // Windows can briefly retain the executable after the child exits.
+  await rm(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
 }
