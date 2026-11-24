@@ -46,6 +46,12 @@ try {
     foreignHost.resume();
     assert.equal(foreignHost.statusCode, 403);
     assert.equal((await fetch(new URL('/api/missing', url), { headers })).status, 404);
+    const done = await fetch(new URL('/api/close', url), {
+      method: 'POST', headers: { ...headers, Origin: url.origin },
+    });
+    assert.equal(done.status, 200);
+    const [code] = await closed;
+    assert.equal(code, 0, 'Done should stop the settings process');
   } finally {
     server.kill();
     await closed;
