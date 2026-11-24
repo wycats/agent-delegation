@@ -1,3 +1,8 @@
+use crate::invocation::{
+    AssignmentCommand, ChatAction, ChatCommand, Editor, HelpTopic, Invocation, ProviderArgs,
+    UsageError,
+};
+use ahp_types::state::PendingMessageKind;
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -43,18 +48,6 @@ pub(crate) struct ChatTarget {
     pub model: String,
 }
 
-pub struct Editor {
-    pub code: String,
-    pub profile: Option<String>,
-}
-
-#[derive(Default)]
-pub struct Invocation {
-    pub args: Vec<String>,
-    pub editor: Option<Editor>,
-    pub native_model: Option<String>,
-}
-
 impl Target {
     fn backend(&self) -> &'static str {
         match self {
@@ -72,63 +65,26 @@ impl Target {
         }
     }
 
-    fn resolve(&self, args: &[String], directory: &Path) -> Result<Invocation, String> {
-        let Some((command, rest)) = args.split_first() else {
+    fn resolve(&self, args: &[String], directory: &Path) -> Result<Invocation, UsageError> {
+        if args.is_empty() {
             return Err("a target needs a command".into());
-        };
-        let mut call = Invocation {
-            args: vec![self.backend().into(), command.clone()],
-            ..Default::default()
-        };
-        if let Self::Ahp(target) = self {
-            let saved = match target {
-                AhpTarget::Saved { assignment } => Some(assignment),
-                AhpTarget::Chat(_) => None,
-            };
-            if matches!(command.as_str(), "--help" | "-h" | "help") && rest.is_empty() {
-                println!(
-                    "Named AHP commands: models, chats, status, send <prompt-file>, steer <prompt-file>"
-                );
-                if saved.is_some() {
-                    println!("Assignment commands: check, submit <prompt-file>, watch, inspect");
-                }
-                call.args.clear();
-            } else if matches!(command.as_str(), "check" | "submit" | "watch" | "inspect") {
-                let files =
-                    saved.ok_or("this AHP target needs an assignment config and receipt")?;
-                if rest.len() != usize::from(command == "submit") {
-                    return Err(
-                        "submit takes one prompt file; check, watch and inspect take no arguments"
-                            .into(),
-                    );
-                }
-                for path in [&files.config, &files.receipt] {
-                    let path = directory.join(path);
-                    call.args.push(
-                        path.into_os_string()
-                            .into_string()
-                            .map_err(|_| "invalid assignment path")?,
-                    );
-                }
-                call.args.extend_from_slice(rest);
-            } else {
-                match target {
-                    AhpTarget::Chat(chat) => chat.route(command, rest, &mut call)?,
-                    AhpTarget::Saved { assignment } => assignment
-                        .chat(directory)?
-                        .route(command, rest, &mut call)?,
-                }
-            }
-        } else {
-            let model = self.model(directory)?;
-            if model.trim().is_empty() {
-                return Err("target model must be nonempty".into());
-            }
-            call.native_model = Some(model);
-            call.args.extend_from_slice(rest);
         }
-        Ok(call)
+        match self {
+            Self::Ahp(target) => ahp(args, Some((target, directory))),
+            Self::Claude { model } => Ok(Invocation::Claude(provider_args(args, Some(model))?)),
+            Self::Google { model } => Ok(Invocation::Google(provider_args(args, Some(model))?)),
+        }
     }
+}
+
+fn provider_args(args: &[String], model: Option<&String>) -> Result<ProviderArgs, UsageError> {
+    if model.is_some_and(|id| id.trim().is_empty()) {
+        return Err("target model must be nonempty".into());
+    }
+    Ok(ProviderArgs {
+        args: args.to_vec(),
+        model: model.cloned(),
+    })
 }
 
 impl AssignmentFiles {
@@ -141,30 +97,152 @@ impl AssignmentFiles {
     }
 }
 
-impl ChatTarget {
-    fn route(&self, command: &str, rest: &[String], call: &mut Invocation) -> Result<(), String> {
-        if self.session.trim().is_empty()
-            || self.chat.trim().is_empty()
-            || self.model.trim().is_empty()
-        {
-            return Err("AHP target needs a session, chat and model".into());
+fn ahp(args: &[String], target: Option<(&AhpTarget, &Path)>) -> Result<Invocation, UsageError> {
+    let (verb, operands) = args.split_first().ok_or(UsageError::Chat)?;
+    if operands.is_empty()
+        && (matches!(verb.as_str(), "--help" | "-h") || (target.is_some() && verb == "help"))
+    {
+        let topic = match target {
+            None => HelpTopic::Ahp,
+            Some((target, _)) => HelpTopic::NamedAhp {
+                assignments: matches!(target, AhpTarget::Saved { .. }),
+            },
+        };
+        return Ok(Invocation::Help(topic));
+    }
+    if matches!(verb.as_str(), "check" | "inspect" | "watch" | "submit") {
+        return assignment_call(verb, operands, target);
+    }
+    let saved_chat;
+    let bound = match target {
+        Some((AhpTarget::Chat(chat), _)) => Some(chat),
+        Some((AhpTarget::Saved { assignment }, directory)) => {
+            saved_chat = assignment.chat(directory)?;
+            Some(&saved_chat)
         }
-        call.editor = Some(Editor {
-            code: self.code.clone().unwrap_or_else(|| "code".into()),
-            profile: self.user_data_dir.clone(),
-        });
-        match (command, rest) {
-            ("models" | "chats", []) => call.args.push(self.session.clone()),
-            ("status", []) => call.args.extend([self.session.clone(), self.chat.clone()]),
-            ("send" | "steer", [prompt]) => call.args.extend([
-                self.session.clone(),
-                self.chat.clone(),
-                self.model.clone(),
-                prompt.clone(),
-            ]),
-            _ => return Err("unsupported named AHP command or arguments; use --help".into()),
+        None => None,
+    };
+    chat_call(verb, operands, bound)
+}
+
+fn assignment_call(
+    verb: &str,
+    operands: &[String],
+    target: Option<(&AhpTarget, &Path)>,
+) -> Result<Invocation, UsageError> {
+    let (config, receipt, remaining) = match target {
+        Some((AhpTarget::Saved { assignment }, directory)) => (
+            directory.join(&assignment.config),
+            directory.join(&assignment.receipt),
+            operands,
+        ),
+        Some((AhpTarget::Chat(_), _)) => {
+            return Err("this AHP target needs an assignment config and receipt".into());
         }
-        Ok(())
+        None => {
+            let [config, receipt, tail @ ..] = operands else {
+                return Err(UsageError::Assignment);
+            };
+            (PathBuf::from(config), PathBuf::from(receipt), tail)
+        }
+    };
+    let command = match (verb, remaining) {
+        ("check", []) => AssignmentCommand::Check,
+        ("inspect", []) => AssignmentCommand::Inspect,
+        ("watch", []) => AssignmentCommand::Watch,
+        ("submit", [prompt]) => AssignmentCommand::Submit(prompt.into()),
+        _ if target.is_some() => {
+            return Err(
+                "submit takes one prompt file; check, watch and inspect take no arguments".into(),
+            );
+        }
+        _ => return Err(UsageError::Assignment),
+    };
+    Ok(Invocation::Assignment {
+        config,
+        receipt,
+        command,
+    })
+}
+
+fn chat_call(
+    verb: &str,
+    operands: &[String],
+    bound: Option<&ChatTarget>,
+) -> Result<Invocation, UsageError> {
+    if bound.is_some_and(|chat| {
+        [&chat.session, &chat.chat, &chat.model]
+            .iter()
+            .any(|s| s.trim().is_empty())
+    }) {
+        return Err("AHP target needs a session, chat and model".into());
+    }
+    let usage = || {
+        if bound.is_some() {
+            UsageError::from("unsupported named AHP command or arguments; use --help")
+        } else {
+            UsageError::Chat
+        }
+    };
+    let mut rest = operands.iter();
+    // Named commands bind their destination fields from TOML. Direct commands
+    // consume the same fields from positional arguments.
+    let mut field =
+        |value: Option<&String>| value.or_else(|| rest.next()).cloned().ok_or_else(usage);
+    let session = field(bound.map(|t| &t.session))?;
+    let command = match verb {
+        "chats" => ChatCommand::Chats,
+        "models" => ChatCommand::Models,
+        "status" | "send" | "steer" => {
+            let chat = field(bound.map(|t| &t.chat))?;
+            let action = if verb == "status" {
+                ChatAction::Status
+            } else {
+                ChatAction::Message {
+                    kind: if verb == "steer" {
+                        PendingMessageKind::Steering
+                    } else {
+                        PendingMessageKind::Queued
+                    },
+                    model: field(bound.map(|t| &t.model))?,
+                    prompt: field(None)?.into(),
+                }
+            };
+            ChatCommand::OnChat { chat, action }
+        }
+        _ => return Err(usage()),
+    };
+    if rest.next().is_some() {
+        return Err(usage());
+    }
+    let (code, profile) = match bound {
+        Some(chat) => (chat.code.clone(), chat.user_data_dir.clone()),
+        None => (
+            env::var("AGENT_DELEGATION_CODE").ok(),
+            env::var("AGENT_DELEGATION_USER_DATA_DIR").ok(),
+        ),
+    };
+    let editor = Editor {
+        code: code.unwrap_or_else(|| "code".into()),
+        profile,
+    };
+    Ok(Invocation::Chat {
+        editor,
+        session,
+        command,
+    })
+}
+
+fn direct(args: &[String]) -> Result<Invocation, UsageError> {
+    let Some((first, rest)) = args.split_first() else {
+        return Ok(Invocation::Help(HelpTopic::General));
+    };
+    match first.as_str() {
+        "help" | "--help" | "-h" => Ok(Invocation::Help(HelpTopic::General)),
+        "claude" => Ok(Invocation::Claude(provider_args(rest, None)?)),
+        "google" => Ok(Invocation::Google(provider_args(rest, None)?)),
+        "ahp" => ahp(rest, None),
+        _ => ahp(args, None), // Original unprefixed AHP commands.
     }
 }
 
@@ -188,7 +266,7 @@ fn config_path(explicit: Option<&str>) -> Result<PathBuf, String> {
         .join("targets.toml"))
 }
 
-pub fn invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
+pub fn invocation(args: Vec<String>) -> Result<Option<Invocation>, UsageError> {
     let mut config = None;
     let mut name = None;
     let mut rest = args.as_slice();
@@ -205,7 +283,7 @@ pub fn invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
             || value.starts_with("--")
             || slot.replace(value.as_str()).is_some()
         {
-            return Err(format!("supply {option} once with a value"));
+            return Err(format!("supply {option} once with a value").into());
         }
         rest = remaining;
     }
@@ -215,10 +293,7 @@ pub fn invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
                 "use [--config PATH] targets or [--config PATH] --target NAME <command>".into(),
             );
         }
-        return Ok(Some(Invocation {
-            args,
-            ..Default::default()
-        }));
+        return direct(rest).map(Some);
     }
     let path = config_path(config)?;
     let source =
@@ -231,8 +306,7 @@ pub fn invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
             .targets
             .get(name)
             .ok_or_else(|| format!("unknown target {name:?} in {}", path.display()))?;
-        let call = target.resolve(rest, directory)?;
-        return Ok((!call.args.is_empty()).then_some(call));
+        return target.resolve(rest, directory).map(Some);
     }
     for (name, target) in config.targets {
         println!(
@@ -243,4 +317,62 @@ pub fn invocation(args: Vec<String>) -> Result<Option<Invocation>, String> {
         );
     }
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn named_and_direct_ahp_forms_resolve_to_identical_requests() {
+        let registry = Path::new("registry");
+        let saved = Target::Ahp(AhpTarget::Saved {
+            assignment: AssignmentFiles {
+                config: "config.json".into(),
+                receipt: "receipt.json".into(),
+            },
+        });
+        let config = registry.join("config.json");
+        let receipt = registry.join("receipt.json");
+        let named = saved
+            .resolve(&argv(&["submit", "task.txt"]), registry)
+            .unwrap();
+        let operands = argv(&[
+            "submit",
+            config.to_str().unwrap(),
+            receipt.to_str().unwrap(),
+            "task.txt",
+        ]);
+        assert_eq!(direct(&operands).unwrap(), named);
+        let mut prefixed = argv(&["ahp"]);
+        prefixed.extend(operands);
+        assert_eq!(direct(&prefixed).unwrap(), named);
+
+        let chat = Target::Ahp(AhpTarget::Chat(ChatTarget {
+            code: env::var("AGENT_DELEGATION_CODE").ok(),
+            user_data_dir: env::var("AGENT_DELEGATION_USER_DATA_DIR").ok(),
+            session: "session".into(),
+            chat: "chat".into(),
+            model: "provider/model".into(),
+        }));
+        for verb in ["send", "steer"] {
+            let named = chat.resolve(&argv(&[verb, "task.txt"]), registry).unwrap();
+            assert_eq!(
+                direct(&argv(&[
+                    "ahp",
+                    verb,
+                    "session",
+                    "chat",
+                    "provider/model",
+                    "task.txt"
+                ]))
+                .unwrap(),
+                named
+            );
+        }
+    }
 }

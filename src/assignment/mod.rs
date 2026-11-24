@@ -1,4 +1,5 @@
 //! Full assignments attach to a saved AHP 1.1 session for the lifetime of its turn.
+use crate::invocation::AssignmentCommand;
 mod connection;
 mod plugin;
 mod profile;
@@ -214,25 +215,27 @@ impl Assignment {
         }
     }
 
-    async fn operate(&mut self, mode: &str, prompt: Option<String>) -> Result<()> {
+    async fn operate(&mut self, mode: &AssignmentCommand, prompt: Option<String>) -> Result<()> {
         let session = self.conn.session.clone();
         let chat = self.conn.chat.clone();
         let previous = self.receipt["attempt"]["turnId"]
             .as_str()
             .map(str::to_owned);
         let turn = match mode {
-            "submit" => Some(Uuid::new_v4().to_string()),
-            "watch" => Some(previous.clone().ok_or("no recorded attempt to watch")?),
+            AssignmentCommand::Submit(_) => Some(Uuid::new_v4().to_string()),
+            AssignmentCommand::Watch => {
+                Some(previous.clone().ok_or("no recorded attempt to watch")?)
+            }
             _ => None,
         };
         // A resuming host can request a skill as soon as it recognizes its
         // original client ID, before the reconnect response arrives.
-        if matches!(mode, "watch" | "inspect")
+        if matches!(mode, AssignmentCommand::Watch | AssignmentCommand::Inspect)
             && let Some(path) = &self.config.target.plugin_root
         {
             self.conn.plugin = Some(Plugin::open(path)?);
         }
-        let read_only = mode == "check";
+        let read_only = matches!(mode, AssignmentCommand::Check);
         let client_id = if read_only {
             Uuid::new_v4().to_string()
         } else {
@@ -301,7 +304,7 @@ impl Assignment {
             self.receipt["attempt"]["outcome"] = outcome.into();
         }
         self.progress(true)?;
-        if mode == "inspect" {
+        if matches!(mode, AssignmentCommand::Inspect) {
             let path = sidecar(&self.receipt_path, ".chat.json");
             save(&path, &state)?;
             self.persist()?;
@@ -324,7 +327,7 @@ impl Assignment {
                 self.receipt["attempt"]["outcome"].as_str(),
                 Some("complete" | "error" | "cancelled" | "rejected")
             );
-        if mode == "submit" {
+        if matches!(mode, AssignmentCommand::Submit(_)) {
             if !can_submit || !state["activeTurn"].is_null() {
                 return Err("a turn is active or a previous attempt is unresolved");
             }
@@ -383,13 +386,13 @@ fn target_plugin_uri(config: &Config) -> Option<String> {
         .map(String::from)
 }
 
-pub(super) async fn run(args: &[String]) -> Result<()> {
-    let mode = args[0].as_str();
-    if args.len() != if mode == "submit" { 4 } else { 3 } {
-        return Err(super::USAGE);
-    }
-    let prompt = if mode == "submit" {
-        let text = fs::read_to_string(&args[3]).map_err(|_| "cannot read UTF-8 prompt file")?;
+pub(super) async fn run(
+    config_path: &Path,
+    receipt_path: &Path,
+    mode: AssignmentCommand,
+) -> Result<()> {
+    let prompt = if let AssignmentCommand::Submit(prompt_path) = &mode {
+        let text = fs::read_to_string(prompt_path).map_err(|_| "cannot read UTF-8 prompt file")?;
         if text.trim().is_empty() {
             return Err("empty prompt");
         }
@@ -397,18 +400,18 @@ pub(super) async fn run(args: &[String]) -> Result<()> {
     } else {
         None
     };
-    let path = Path::new(&args[2])
+    let path = receipt_path
         .canonicalize()
         .map_err(|_| "receipt unavailable")?;
-    let _lock = if mode != "check" {
+    let _lock = if !matches!(mode, AssignmentCommand::Check) {
         Some(ReceiptLock::acquire(&path)?)
     } else {
         None
     };
     let receipt = read_json(&path)?;
-    let config = Config::read(Path::new(&args[1]), &receipt)?;
+    let config = Config::read(config_path, &receipt)?;
     let previous_turn = receipt["attempt"]["turnId"].clone();
-    if mode == "watch" && receipt["attempt"]["outcome"] == "rejected" {
+    if matches!(mode, AssignmentCommand::Watch) && receipt["attempt"]["outcome"] == "rejected" {
         report_rejected(&receipt);
         return Ok(());
     }
@@ -421,14 +424,15 @@ pub(super) async fn run(args: &[String]) -> Result<()> {
         receipt_path: path,
         conn,
     };
-    let result = assignment.operate(mode, prompt).await;
-    if mode != "check" {
+    let result = assignment.operate(&mode, prompt).await;
+    if !matches!(mode, AssignmentCommand::Check) {
         assignment.persist()?;
         assignment.progress(false)?;
         // The host can disconnect immediately after replaying the rejected
         // dispatch. That proof survives even if a later snapshot failed.
-        let watching_this_attempt = mode == "watch"
-            || (mode == "submit" && assignment.receipt["attempt"]["turnId"] != previous_turn);
+        let watching_this_attempt = matches!(mode, AssignmentCommand::Watch)
+            || (matches!(mode, AssignmentCommand::Submit(_))
+                && assignment.receipt["attempt"]["turnId"] != previous_turn);
         if watching_this_attempt && assignment.conn.terminal == Some("rejected") {
             report_rejected(&assignment.receipt);
             return Ok(());

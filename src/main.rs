@@ -1,7 +1,12 @@
 //! Attach to a chat on the local VS Code Agent Host.
 //! Discovers credentials in memory through VS Code; never writes or prints them.
 mod assignment;
+mod invocation;
 use ahp::{Client, ClientConfig, Transport, TransportError, TransportMessage};
+use ahp_types::state::PendingMessageKind;
+use invocation::{
+    ChatAction, ChatCommand, Editor, HelpTopic, Invocation, ProviderArgs, UsageError,
+};
 mod targets;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
@@ -59,12 +64,9 @@ fn editor_endpoint(endpoints: &Value, pid: u64) -> Result<&Value, &'static str> 
 fn pending_action(
     id: &str,
     text: &str,
-    kind: &str,
+    kind: PendingMessageKind,
     model: &str,
 ) -> Result<ahp_types::actions::StateAction, &'static str> {
-    if !matches!(kind, "queued" | "steering") {
-        return Err("unsupported pending message kind");
-    }
     serde_json::from_value(json!({
         "type": "chat/pendingMessageSet", "kind": kind, "id": id,
         "message": {"text": text, "origin": {"kind": "user"}, "model": {"id": model}}
@@ -213,21 +215,12 @@ async fn snapshot(client: &Client, channel: &str) -> Result<Value, &'static str>
     }
     Ok(snapshot["state"].clone())
 }
-async fn run(args: &[String], editor: Option<targets::Editor>) -> Result<(), &'static str> {
-    if args == ["--help"] || args == ["-h"] {
-        println!("{USAGE}");
-        return Ok(());
-    }
-    let mode = args.first().map(String::as_str).unwrap_or("");
-    match (mode, args.len()) {
-        ("chats" | "models", 2) | ("status", 3) | ("send" | "steer", 5) => {}
-        _ => return Err(USAGE),
-    }
-    let session_uri = &args[1];
-    let targets::Editor { code: cli, profile } = editor.unwrap_or_else(|| targets::Editor {
-        code: std::env::var("AGENT_DELEGATION_CODE").unwrap_or_else(|_| "code".into()),
-        profile: std::env::var("AGENT_DELEGATION_USER_DATA_DIR").ok(),
-    });
+async fn run_chat(
+    editor: Editor,
+    session_uri: &str,
+    command: ChatCommand,
+) -> Result<(), &'static str> {
+    let Editor { code: cli, profile } = editor;
     let hosts = code_agent(&cli, &["ps", "--all", "--json"], profile.as_deref())?
         .output()
         .await
@@ -264,133 +257,139 @@ async fn run(args: &[String], editor: Option<targets::Editor>) -> Result<(), &'s
         return Err("host did not negotiate AHP 1.0.0");
     }
     let session = snapshot(&client, session_uri).await?;
-    if mode == "models" {
-        let provider = session["provider"]
-            .as_str()
-            .ok_or("missing session provider")?;
-        let root = snapshot(&client, "ahp-root://").await?;
-        let models = root["agents"]
+    let chat_catalog = || {
+        session["chats"]
             .as_array()
-            .and_then(|agents| agents.iter().find(|agent| agent["provider"] == provider))
-            .and_then(|agent| agent["models"].as_array())
-            .ok_or("host did not advertise a model catalog for this session provider")?;
-        for model in models {
-            println!(
-                "{}",
-                json!({"provider": provider, "id": model["id"], "name": model["name"]})
-            );
+            .ok_or("session chat catalog missing")
+    };
+    let (chat, action) = match command {
+        ChatCommand::Models => {
+            let provider = session["provider"]
+                .as_str()
+                .ok_or("missing session provider")?;
+            let root = snapshot(&client, "ahp-root://").await?;
+            let models = root["agents"]
+                .as_array()
+                .and_then(|agents| agents.iter().find(|agent| agent["provider"] == provider))
+                .and_then(|agent| agent["models"].as_array())
+                .ok_or("host did not advertise a model catalog for this session provider")?;
+            for model in models {
+                println!(
+                    "{}",
+                    json!({"provider": provider, "id": model["id"], "name": model["name"]})
+                );
+            }
+            client.shutdown().await;
+            return Ok(());
         }
-        client.shutdown().await;
-        return Ok(());
-    }
-    let chats = session["chats"]
-        .as_array()
-        .ok_or("session chat catalog missing")?;
-    if mode == "chats" {
-        for chat in chats {
-            println!(
-                "{}",
-                json!({"resource": chat["resource"], "title": chat["title"]})
-            );
+        ChatCommand::Chats => {
+            for chat in chat_catalog()? {
+                println!(
+                    "{}",
+                    json!({"resource": chat["resource"], "title": chat["title"]})
+                );
+            }
+            client.shutdown().await;
+            return Ok(());
         }
-        client.shutdown().await;
-        return Ok(());
-    }
-    let chat = args[2].as_str();
-    if !chats.iter().any(|entry| entry["resource"] == chat) {
+        ChatCommand::OnChat { chat, action } => (chat, action),
+    };
+    let chat = chat.as_str();
+    if !chat_catalog()?
+        .iter()
+        .any(|entry| entry["resource"] == chat)
+    {
         return Err("selected chat does not belong to the session");
     }
     let state = snapshot(&client, chat).await?;
-    if mode == "status" {
-        let active = &state["activeTurn"]["responseParts"];
-        let active_text = active
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|p| p["kind"] == "markdown")
-            .filter_map(|p| p["content"].as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let parts: Vec<_> = active
-            .as_array()
-            .into_iter()
-            .flatten()
-            .rev()
-            .take(8)
-            .map(|p| json!({"kind":p["kind"],"toolStatus":p["toolCall"]["status"]}))
-            .collect();
-        let last = state["turns"].as_array().and_then(|t| t.last());
-        let last_text: Vec<_> = last
-            .and_then(|t| t["responseParts"].as_array())
-            .into_iter()
-            .flatten()
-            .filter(|p| p["kind"] == "markdown")
-            .filter_map(|p| p["content"].as_str())
-            .collect();
-        println!(
-            "{}",
-            json!({
-                "protocolVersion": init["protocolVersion"],
-                "chat": chat,
-                "status": state["status"],
-                "activity": state["activity"],
-                "turns": state["turns"].as_array().map(Vec::len),
-                "activeTurnId": state["activeTurn"]["id"],
-                "lastModelId": state["activeTurn"]["message"]["model"]["id"].as_str()
-                    .or_else(|| last.and_then(|turn| turn["message"]["model"]["id"].as_str())),
-                "activeParts": parts,
-                "activeText": active_text.chars().rev().take(2400).collect::<String>().chars().rev().collect::<String>(),
-                "lastCompletedText": last_text.join("\n").chars().take(4000).collect::<String>(),
-                "queuedMessages": state["queuedMessages"].as_array().map(Vec::len),
-                "steeringMessageId": state["steeringMessage"]["id"],
-                "queuedMessageIds": state["queuedMessages"].as_array().map(|messages| {
-                    messages.iter().map(|message| &message["id"]).collect::<Vec<_>>()
-                }),
-            })
-        );
-    } else {
-        let path = &args[4];
-        let text = std::fs::read_to_string(path).map_err(|_| "cannot read prompt file")?;
-        if text.trim().is_empty() || text.len() > 32000 {
-            return Err("prompt must contain 1..32000 bytes");
+    match action {
+        ChatAction::Status => {
+            let active = &state["activeTurn"]["responseParts"];
+            let active_text = active
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|p| p["kind"] == "markdown")
+                .filter_map(|p| p["content"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let parts: Vec<_> = active
+                .as_array()
+                .into_iter()
+                .flatten()
+                .rev()
+                .take(8)
+                .map(|p| json!({"kind":p["kind"],"toolStatus":p["toolCall"]["status"]}))
+                .collect();
+            let last = state["turns"].as_array().and_then(|t| t.last());
+            let last_text: Vec<_> = last
+                .and_then(|t| t["responseParts"].as_array())
+                .into_iter()
+                .flatten()
+                .filter(|p| p["kind"] == "markdown")
+                .filter_map(|p| p["content"].as_str())
+                .collect();
+            println!(
+                "{}",
+                json!({
+                    "protocolVersion": init["protocolVersion"],
+                    "chat": chat,
+                    "status": state["status"],
+                    "activity": state["activity"],
+                    "turns": state["turns"].as_array().map(Vec::len),
+                    "activeTurnId": state["activeTurn"]["id"],
+                    "lastModelId": state["activeTurn"]["message"]["model"]["id"].as_str()
+                        .or_else(|| last.and_then(|turn| turn["message"]["model"]["id"].as_str())),
+                    "activeParts": parts,
+                    "activeText": active_text.chars().rev().take(2400).collect::<String>().chars().rev().collect::<String>(),
+                    "lastCompletedText": last_text.join("\n").chars().take(4000).collect::<String>(),
+                    "queuedMessages": state["queuedMessages"].as_array().map(Vec::len),
+                    "steeringMessageId": state["steeringMessage"]["id"],
+                    "queuedMessageIds": state["queuedMessages"].as_array().map(|messages| {
+                        messages.iter().map(|message| &message["id"]).collect::<Vec<_>>()
+                    }),
+                })
+            );
         }
-        let id = uuid::Uuid::new_v4().to_string();
-        eprintln!("{}", json!({"intentMessageId":id,"chat":chat}));
-        let action = pending_action(
-            &id,
-            &text,
-            if mode == "steer" {
-                "steering"
-            } else {
-                "queued"
-            },
-            &args[3],
-        )?;
-        let mut subscription = client.attach_subscription(chat).await;
-        let handle = client
-            .dispatch(chat.into(), action)
-            .await
-            .map_err(|_| "dispatch failed; reconcile before retry")?;
-        let echoed = timeout(Duration::from_secs(20), async {
-            while let Some(event) = subscription.recv().await {
-                if let ahp::SubscriptionEvent::Action(env) = event {
-                    let value = serde_json::to_value(&env).map_err(|_| "invalid acknowledgment")?;
-                    if matches_ack(&value, chat, &id, handle.client_seq) {
-                        if !value["rejectionReason"].is_null() {
-                            return Err("host rejected message");
+        ChatAction::Message {
+            kind,
+            model,
+            prompt: path,
+        } => {
+            let text = std::fs::read_to_string(path).map_err(|_| "cannot read prompt file")?;
+            if text.trim().is_empty() || text.len() > 32000 {
+                return Err("prompt must contain 1..32000 bytes");
+            }
+            let id = uuid::Uuid::new_v4().to_string();
+            eprintln!("{}", json!({"intentMessageId":id,"chat":chat}));
+            let action = pending_action(&id, &text, kind, &model)?;
+            let mut subscription = client.attach_subscription(chat).await;
+            let handle = client
+                .dispatch(chat.into(), action)
+                .await
+                .map_err(|_| "dispatch failed; reconcile before retry")?;
+            let echoed = timeout(Duration::from_secs(20), async {
+                while let Some(event) = subscription.recv().await {
+                    if let ahp::SubscriptionEvent::Action(env) = event {
+                        let value =
+                            serde_json::to_value(&env).map_err(|_| "invalid acknowledgment")?;
+                        if matches_ack(&value, chat, &id, handle.client_seq) {
+                            if !value["rejectionReason"].is_null() {
+                                return Err("host rejected message");
+                            }
+                            return Ok(value);
                         }
-                        return Ok(value);
                     }
                 }
-            }
-            Err("channel closed; reconcile before retry")
-        })
-        .await
-        .map_err(|_| "acknowledgment timeout; reconcile before retry")??;
-        println!(
-            "{}",
-            json!({"accepted":true,"messageId":id,"clientSeq":handle.client_seq,"serverSeq":echoed["serverSeq"],"hostKind":echoed["action"]["kind"],"chat":chat})
-        );
+                Err("channel closed; reconcile before retry")
+            })
+            .await
+            .map_err(|_| "acknowledgment timeout; reconcile before retry")??;
+            println!(
+                "{}",
+                json!({"accepted":true,"messageId":id,"clientSeq":handle.client_seq,"serverSeq":echoed["serverSeq"],"hostKind":echoed["action"]["kind"],"chat":chat})
+            );
+        }
     }
     client.shutdown().await;
     Ok(())
@@ -401,60 +400,79 @@ async fn main() {
     let call = match targets::invocation(std::env::args().skip(1).collect()) {
         Ok(Some(call)) => call,
         Ok(None) => return,
-        Err(error) => {
+        Err(UsageError::Arguments(error)) => {
             eprintln!("{error}");
             std::process::exit(2);
         }
+        Err(UsageError::Chat) => {
+            eprintln!("{USAGE}");
+            std::process::exit(1);
+        }
+        Err(UsageError::Assignment) => assignment_error(USAGE),
     };
-    let args = call.args;
-    let (channel, rest) = args
-        .split_first()
-        .map(|(first, rest)| (first.as_str(), rest))
-        .unwrap_or(("--help", &[]));
-    let args = match channel {
-        "--help" | "-h" | "help" => {
+    match call {
+        Invocation::Help(topic) => print_help(topic),
+        Invocation::Claude(call) => {
+            run_provider(include_bytes!("../providers/claude/runner.mjs"), call)
+        }
+        Invocation::Google(call) => {
+            run_provider(include_bytes!("../providers/google/runner.mjs"), call)
+        }
+        Invocation::Assignment {
+            config,
+            receipt,
+            command,
+        } => {
+            if let Err(error) = assignment::run(&config, &receipt, command).await {
+                assignment_error(error);
+            }
+        }
+        Invocation::Chat {
+            editor,
+            session,
+            command,
+        } => {
+            if let Err(error) =
+                timeout(Duration::from_secs(45), run_chat(editor, &session, command))
+                    .await
+                    .unwrap_or(Err("operation timed out; reconcile before retry"))
+            {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
+}
+
+fn print_help(topic: HelpTopic) {
+    match topic {
+        HelpTopic::General => println!(
+            "agent-delegation [--config PATH] targets\nagent-delegation [--config PATH] --target NAME <command> [arguments]\nagent-delegation <ahp|claude|google> <command> [arguments]\n\n{USAGE}\nagent-delegation claude --help\nagent-delegation google --help"
+        ),
+        HelpTopic::Ahp => println!("{USAGE}"),
+        HelpTopic::NamedAhp { assignments } => {
             println!(
-                "agent-delegation [--config PATH] targets\nagent-delegation [--config PATH] --target NAME <command> [arguments]\nagent-delegation <ahp|claude|google> <command> [arguments]\n\n{USAGE}\nagent-delegation claude --help\nagent-delegation google --help"
+                "Named AHP commands: models, chats, status, send <prompt-file>, steer <prompt-file>"
             );
-            return;
-        }
-        "claude" | "google" => {
-            // Ship the exact provider implementation inside the executable. Provider
-            // arguments stay in argv, while Node reads the module itself on stdin.
-            let script: &[u8] = match channel {
-                "claude" => include_bytes!("../providers/claude/runner.mjs"),
-                _ => include_bytes!("../providers/google/runner.mjs"),
-            };
-            let result = run_node(script, rest, call.native_model.as_deref());
-            std::process::exit(result.unwrap_or_else(|error| {
-                eprintln!("Provider runner requires Node.js 22+ on PATH: {error}");
-                1
-            }));
-        }
-        "ahp" => rest,
-        _ => args.as_slice(), // Preserve the original positional AHP commands.
-    };
-    if matches!(
-        args.first().map(String::as_str),
-        Some("check" | "inspect" | "submit" | "watch")
-    ) {
-        if let Err(error) = assignment::run(args).await {
-            eprintln!("{}", json!({"outcome":"uncertain", "diagnostic":error}));
-            std::process::exit(2);
-        }
-        return;
-    }
-    match timeout(Duration::from_secs(45), run(args, call.editor)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(message)) => {
-            eprintln!("{message}");
-            std::process::exit(1)
-        }
-        Err(_) => {
-            eprintln!("operation timed out; reconcile before retry");
-            std::process::exit(1)
+            if assignments {
+                println!("Assignment commands: check, submit <prompt-file>, watch, inspect");
+            }
         }
     }
+}
+
+fn assignment_error(message: &str) -> ! {
+    eprintln!("{}", json!({"outcome":"uncertain", "diagnostic":message}));
+    std::process::exit(2);
+}
+
+fn run_provider(script: &[u8], call: ProviderArgs) -> ! {
+    std::process::exit(
+        run_node(script, &call.args, call.model.as_deref()).unwrap_or_else(|error| {
+            eprintln!("Provider runner requires Node.js 22+ on PATH: {error}");
+            1
+        }),
+    )
 }
 
 fn run_node(script: &[u8], args: &[String], model: Option<&str>) -> std::io::Result<i32> {
@@ -513,17 +531,17 @@ mod tests {
     #[test]
     fn pending_message_preserves_text_and_selected_model() {
         let text = " first  line\n\nsecond\tline\r\n";
-        let value =
-            serde_json::to_value(pending_action("test-id", text, "queued", "test-model").unwrap())
-                .unwrap();
+        let value = serde_json::to_value(
+            pending_action("test-id", text, PendingMessageKind::Queued, "test-model").unwrap(),
+        )
+        .unwrap();
         assert_eq!(value["message"]["text"], text);
         assert_eq!(value["message"]["model"]["id"], "test-model");
         assert_eq!(value["kind"], "queued");
         let steering = serde_json::to_value(
-            pending_action("steer-id", text, "steering", "test-model").unwrap(),
+            pending_action("steer-id", text, PendingMessageKind::Steering, "test-model").unwrap(),
         )
         .unwrap();
         assert_eq!(steering["kind"], "steering");
-        assert!(pending_action("x", text, "unsupported", "test-model").is_err());
     }
 }
