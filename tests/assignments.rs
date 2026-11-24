@@ -218,7 +218,21 @@ esac
                                     .map(|id| json!({"id":id}))
                                     .unwrap_or_default()
                             };
-                            json!({"status":1,"workingDirectories":[workspace.as_str()],"activeTurn":active,"turns":if completed && !matches!(end,End::Mismatch) {json!([{"id":started,"state":outcome,"responseParts":[{"kind":"markdown","content":"fixture answer"}]}])}else{json!([])}})
+                            let turns = if !completed || matches!(end, End::Mismatch) {
+                                json!([])
+                            } else if matches!(end, End::NoWrittenReply) {
+                                json!([
+                                    {"id":started,"state":outcome,"responseParts":[
+                                        {"kind":"toolCall","content":"tool output"},
+                                        {"kind":"reasoning","content":"reasoning"},
+                                        {"kind":"markdown","content":" \n\t"}
+                                    ]},
+                                    {"id":"follow-up","state":"complete","responseParts":[{"kind":"markdown","content":"later verdict"}]}
+                                ])
+                            } else {
+                                json!([{"id":started,"state":outcome,"responseParts":[{"kind":"markdown","content":"fixture answer"}]}])
+                            };
+                            json!({"status":1,"workingDirectories":[workspace.as_str()],"activeTurn":active,"turns":turns})
                         }
                         _ => panic!("unexpected channel"),
                     };
@@ -380,6 +394,7 @@ fn unrelated_rejections(start: &Value) -> Vec<Value> {
 #[derive(Clone, Copy)]
 enum End {
     Complete,
+    NoWrittenReply,
     Disconnect,
     Mismatch,
     AlreadyDone,
@@ -401,6 +416,7 @@ async fn named_neon_assignment_serves_skills_after_waiting_and_saves_the_result_
     assert!(records.iter().any(|r| r["outcome"] == "waiting"));
     let last = records.last().unwrap();
     assert_eq!(last["outcome"], "complete");
+    assert_eq!(last["hasWrittenReply"], true);
     let state: Value =
         serde_json::from_slice(&fs::read(last["transcript"].as_str().unwrap()).unwrap()).unwrap();
     assert_eq!(state["turns"][0]["id"], last["turnId"]);
@@ -419,6 +435,62 @@ async fn named_neon_assignment_serves_skills_after_waiting_and_saves_the_result_
     );
     assert!(!f.dir.join("receipt.lock").exists());
     assert!(!f.dir.join("agy-calls").exists());
+}
+
+#[tokio::test]
+async fn inspect_keeps_the_original_terminal_snapshot_and_outcome() {
+    let f = Fixture::named();
+    let (code, records) = f.invoke("submit", End::NoWrittenReply, None).await;
+    assert_eq!(code, 0);
+    let result = records.last().unwrap();
+    assert_eq!(result["outcome"], "complete");
+    assert_eq!(result["hasWrittenReply"], false);
+    let original_path = result["transcript"].as_str().unwrap();
+    let original = fs::read(original_path).unwrap();
+    let attempt = f.receipt()["attempt"].clone();
+    let turn = attempt["turnId"].as_str().unwrap();
+    assert_eq!(result["turnId"], turn);
+    for reported_id in [turn, "replacement-id"] {
+        let (code, records) = f
+            .invoke("inspect", End::AlreadyDone, Some(reported_id))
+            .await;
+        assert_eq!(code, 0);
+        let inspection = records.last().unwrap();
+        let path = inspection["transcript"].as_str().unwrap();
+        assert_ne!(path, original_path);
+        let current: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        assert_eq!(current["turns"][0]["id"], reported_id);
+        assert_eq!(
+            current["turns"][0]["responseParts"][0]["content"],
+            "fixture answer"
+        );
+        assert_eq!(fs::read(original_path).unwrap(), original);
+        assert_eq!(inspection["attempt"], attempt);
+        assert_eq!(f.receipt()["attempt"], attempt);
+    }
+}
+
+#[tokio::test]
+async fn inspect_reconciles_an_uncertain_outcome_but_keeps_a_settled_one() {
+    let f = Fixture::new();
+    assert_eq!(f.invoke("submit", End::Disconnect, None).await.0, 2);
+    let turn = f.receipt()["attempt"]["turnId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        f.invoke("inspect", End::AlreadyDone, Some(&turn)).await.0,
+        0
+    );
+    assert_eq!(f.receipt()["attempt"]["outcome"], "complete");
+
+    assert_eq!(f.invoke("submit", End::Cancelled, None).await.0, 0);
+    let cancelled = f.receipt()["attempt"].clone();
+    let turn = cancelled["turnId"].as_str().unwrap();
+    let (code, records) = f.invoke("inspect", End::AlreadyDone, Some(turn)).await;
+    assert_eq!(code, 0);
+    assert_eq!(records.last().unwrap()["attempt"]["outcome"], "cancelled");
+    assert_eq!(f.receipt()["attempt"], cancelled);
 }
 
 #[tokio::test]

@@ -21,14 +21,21 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-fn saved_outcome(state: &Value, id: &str) -> Option<&'static str> {
-    let turn = state["turns"].as_array()?.iter().find(|t| t["id"] == id)?;
-    match turn["state"].as_str()? {
-        "complete" => Some("complete"),
-        "error" => Some("error"),
-        "cancelled" => Some("cancelled"),
-        _ => None,
-    }
+fn terminal_turn<'a>(state: &'a Value, id: &str) -> Option<&'a Value> {
+    state["turns"].as_array()?.iter().find(|turn| {
+        turn["id"] == id
+            && matches!(
+                turn["state"].as_str(),
+                Some("complete" | "error" | "cancelled")
+            )
+    })
+}
+
+fn settled(attempt: &Value) -> bool {
+    matches!(
+        attempt["outcome"].as_str(),
+        Some("complete" | "error" | "cancelled" | "rejected")
+    )
 }
 
 fn report_rejected(receipt: &Value) {
@@ -159,15 +166,22 @@ impl Assignment {
         .map_err(|_| "required plugin skills did not load")?
     }
 
-    fn finish(&mut self, turn: &str, outcome: &str, state: &Value) -> Result<()> {
+    fn finish(&mut self, turn: &Value, state: &Value) -> Result<()> {
         let path = sidecar(&self.receipt_path, ".chat.json");
         save(&path, state)?;
-        self.receipt["attempt"]["outcome"] = outcome.into();
+        self.receipt["attempt"]["outcome"] = turn["state"].clone();
         self.persist()?;
+        let has_written_reply = turn["responseParts"].as_array().is_some_and(|parts| {
+            parts.iter().any(|p| {
+                p["kind"] == "markdown"
+                    && p["content"].as_str().is_some_and(|s| !s.trim().is_empty())
+            })
+        });
         println!(
             "{}",
             json!({"clientId":self.receipt["clientId"],"session":self.conn.session,"chat":self.conn.chat,
-            "outcome":outcome,"turnId":turn,"transcript":path,"snapshots":self.conn.snapshots})
+            "outcome":turn["state"],"turnId":turn["id"],"hasWrittenReply":has_written_reply,
+            "transcript":path,"snapshots":self.conn.snapshots})
         );
         Ok(())
     }
@@ -184,10 +198,10 @@ impl Assignment {
             }
             if let Some(expected) = self.conn.terminal {
                 let state = self.conn.snapshot(chat).await?;
-                if saved_outcome(&state, turn) != Some(expected) {
-                    return Err("terminal event and saved turn disagree");
-                }
-                return self.finish(turn, expected, &state);
+                let saved = terminal_turn(&state, turn)
+                    .filter(|t| t["state"] == expected)
+                    .ok_or("terminal event and saved turn disagree")?;
+                return self.finish(saved, &state);
             }
             let now = Instant::now();
             if waiting.is_some_and(|d| d <= now) {
@@ -298,14 +312,15 @@ impl Assignment {
         }
         if self.conn.terminal == Some("rejected") {
             self.persist()?;
-        } else if let Some(ref id) = previous
-            && let Some(outcome) = saved_outcome(&state, id)
+        } else if !settled(&self.receipt["attempt"])
+            && let Some(ref id) = previous
+            && let Some(saved) = terminal_turn(&state, id)
         {
-            self.receipt["attempt"]["outcome"] = outcome.into();
+            self.receipt["attempt"]["outcome"] = saved["state"].clone();
         }
         self.progress(true)?;
         if matches!(mode, AssignmentCommand::Inspect) {
-            let path = sidecar(&self.receipt_path, ".chat.json");
+            let path = sidecar(&self.receipt_path, ".inspect.json");
             save(&path, &state)?;
             self.persist()?;
             let uri = target_plugin_uri(&self.config);
@@ -322,11 +337,7 @@ impl Assignment {
             return Ok(());
         }
         let turn = turn.ok_or("missing turn")?;
-        let can_submit = self.receipt["attempt"].is_null()
-            || matches!(
-                self.receipt["attempt"]["outcome"].as_str(),
-                Some("complete" | "error" | "cancelled" | "rejected")
-            );
+        let can_submit = self.receipt["attempt"].is_null() || settled(&self.receipt["attempt"]);
         if matches!(mode, AssignmentCommand::Submit(_)) {
             if !can_submit || !state["activeTurn"].is_null() {
                 return Err("a turn is active or a previous attempt is unresolved");
@@ -340,8 +351,8 @@ impl Assignment {
             if self.conn.terminal == Some("rejected") {
                 return Ok(());
             }
-            if let Some(outcome) = saved_outcome(&state, &turn) {
-                return self.finish(&turn, outcome, &state);
+            if let Some(saved) = terminal_turn(&state, &turn) {
+                return self.finish(saved, &state);
             }
             if state["activeTurn"]["id"] != turn && self.conn.terminal.is_none() {
                 return Err(

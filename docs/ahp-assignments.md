@@ -50,7 +50,7 @@ For assignments that use the editor's own guidance, omit `pluginRoot`, `pluginRe
 
 ## Completion and recovery
 
-Stdout contains one JSON record per line. A terminal record includes `outcome` (`complete`, `cancelled`, or `error`), `turnId`, and `transcript`. The transcript is the private local chat snapshot. Read the entry in `turns` with that exact ID to get its response. All three are terminal outcomes, so use the record to determine whether the assignment succeeded. While the process is running, `<receipt>.status.json` contains progress metadata.
+Stdout contains one JSON record per line. When `submit` or `watch` confirms a terminal turn, its record includes `outcome` (`complete`, `cancelled`, or `error`), `turnId`, `hasWrittenReply`, and `transcript`. A completed turn can contain only tool calls. `hasWrittenReply` tells you whether that exact turn contains any nonblank Markdown. To review the answer, open the returned private transcript and read the `turns` entry with the matching ID. A later follow-up has its own ID. While the process is running, `<receipt>.status.json` contains progress metadata.
 
 The client records the turn ID, prompt hash, and client sequence in the receipt before dispatch. If the editor explicitly rejects that start, the client records `rejected` and prints the turn ID. This outcome has no transcript because the turn never started. A subsequent `watch` reports the saved rejection, and a new `submit` can start another assignment.
 
@@ -60,5 +60,7 @@ A disconnect before confirmation leaves delivery uncertain and blocks another su
 agent-delegation ahp inspect "$config" "$receipt"
 agent-delegation ahp watch   "$config" "$receipt"
 ```
+
+`inspect` returns the editor's current snapshot in `<receipt>.inspect.json`. It can settle an unresolved receipt when the exact turn is present. The last confirmed `submit` or `watch` snapshot stays in `<receipt>.chat.json`, and an inspection preserves the recorded terminal outcome even if the editor's history changes. Each path holds the latest snapshot of its kind.
 
 `watch` retrieves an already completed turn, recognizes a replayed rejection of the exact start dispatch, or resumes observation and skill serving for the recorded active turn. It never resends a prompt. An operational failure exits with code 2 and a diagnostic on stderr. If a process crashed and left a receipt lock, establish that the original operator has stopped before removing its lock.
