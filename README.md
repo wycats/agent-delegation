@@ -108,7 +108,7 @@ Every pull request targeting `main` and every push to `main` tests, builds and r
 
 To build from a source checkout with stable Rust, run `cargo test --locked` followed by `cargo build --release --locked`. The executable is under `target/release/`.
 
-To publish a version, merge the desired Cargo package version into `main`, then push a matching `vX.Y.Z` tag on that commit. After the builds pass, the workflow publishes the four archives and their checksums together.
+To cut a release, bump the package version in `Cargo.toml`, update `Cargo.lock`, and merge the change into `main`. After all four platform builds pass, GitHub Actions tags that commit and publishes the archives and checksums together. Merges that keep the current version produce CI artifacts only. A manually pushed matching `vX.Y.Z` tag on a commit in `main` also triggers publication.
 
 ## How AHP delivery works
 

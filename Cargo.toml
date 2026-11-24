@@ -1,6 +1,6 @@
 [package]
 name = "agent-delegation"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Delegate through VS Code Agent Host, Claude Code, or Google Antigravity"
 repository = "https://github.com/wycats/agent-delegation"
