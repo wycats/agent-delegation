@@ -4,7 +4,7 @@ Choose the host that owns the conversation and the account you want to use. The 
 
 | Channel | Where the work runs | Following up |
 | --- | --- | --- |
-| `ahp` | An existing VS Code Agent Host chat, using its registered provider and model catalog | Read status, queue a task, or steer the active turn |
+| `ahp` | An existing VS Code Agent Host chat, using its registered provider and model catalog | Read status, queue or steer a message, or run and recover a full assignment |
 | `claude` | A local Claude Code subprocess with first-party Claude sign-in | Steer the running process or resume its exact session |
 | `google` (experimental) | A local Antigravity CLI subprocess using your configured personal Google sign-in | Read its result or send another turn to the exact conversation |
 
@@ -16,6 +16,10 @@ Save your usual destinations in `~/.config/agent-delegation/targets.toml` on mac
 
 ```toml
 [targets.work-neon]
+backend = "ahp"
+assignment = { config = "work/neon-config.json", receipt = "work/neon-receipt.json" }
+
+[targets.editor-chat]
 backend = "ahp"
 code = "/Applications/Visual Studio Code.app/Contents/Resources/app/bin/code"
 user_data_dir = "/absolute/path/to/the/owning/profile"
@@ -35,9 +39,12 @@ model = "claude-fable-5-2"
 ```sh
 agent-delegation targets
 agent-delegation --target work-neon status
-agent-delegation --target work-neon send task.txt
+agent-delegation --target work-neon check
+agent-delegation --target work-neon submit task.txt
 agent-delegation --target personal-neon run --cwd "$PWD" --task task.txt --run-dir "$PWD/run-1"
 ```
+
+For a saved assignment, point the target at the operator’s existing config and receipt. Relative file paths in `assignment` resolve beside `targets.toml`. All four commands use that receipt. The `check` command observes the chat, `submit` records a turn, `inspect` refreshes its local transcript, and `watch` reconnects to the recorded turn. The low-level chat commands also use the editor, session, chat and model from these files. [Assignment setup](docs/ahp-assignments.md)
 
 An AHP target binds an existing chat to its model and owning installation. Omitting `code` selects `code` on PATH. Omitting `user_data_dir` selects that installation's default profile. A named target takes precedence over the shell's editor and profile settings. Use literal paths in TOML. The AHP client obtains fresh endpoint credentials from the editor for each command.
 
@@ -87,7 +94,7 @@ export AGENT_DELEGATION_USER_DATA_DIR="$PROFILE"
 ./agent-delegation ahp status "$session" "$chat"
 ```
 
-The AHP client passes the same user-data directory to session and endpoint discovery. A model ID is opaque to routing. An AHP chat using a Google model remains on that editor host even when Antigravity is installed. Selecting the Google backend invokes Antigravity. The low-level `send` returns the host delivery receipt. A caller that serves plugin skills and collects a finished turn must keep its full-assignment implementation in control of that turn.
+The AHP client passes the same user-data directory to session and endpoint discovery. A model ID is opaque to routing. An AHP chat using a Google model remains on that editor host even when Antigravity is installed. Selecting the Google backend invokes Antigravity. The low-level `send` returns the host delivery receipt. For a full assignment, `ahp submit` keeps the native Rust client connected, serves configured skills and returns the recorded turn’s result. [Full assignment setup and recovery](docs/ahp-assignments.md)
 
 A custom AHP model provider can advertise its own IDs. The client forwards the chosen ID unchanged. A VS Code distribution with the same discovery commands can be selected with `AGENT_DELEGATION_CODE`, for example `code-insiders`. Run the session inventory with the same CLI. On Windows use a command name on PATH or an absolute path to an executable. If discovery fails, check that the `code` on your PATH belongs to the VS Code installation that owns the session and that its `agent --help` lists both discovery commands. If the endpoint is missing or ambiguous, refresh the session inventory and select the intended chat again. To report a problem, share the error string and `code --version` with identifying details removed.
 

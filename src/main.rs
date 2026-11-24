@@ -1,5 +1,6 @@
 //! Attach to a chat on the local VS Code Agent Host.
 //! Discovers credentials in memory through VS Code; never writes or prints them.
+mod assignment;
 use ahp::{Client, ClientConfig, Transport, TransportError, TransportMessage};
 mod targets;
 use futures_util::{SinkExt, StreamExt};
@@ -14,7 +15,7 @@ use tokio::{
 };
 use tokio_tungstenite::{WebSocketStream, tungstenite::Message};
 
-const USAGE: &str = "agent-delegation ahp models|chats <session-uri>\nagent-delegation ahp status <session-uri> <chat-uri>\nagent-delegation ahp send|steer <session-uri> <chat-uri> <model-id> <prompt-file>";
+const USAGE: &str = "agent-delegation ahp models|chats <session-uri>\nagent-delegation ahp status <session-uri> <chat-uri>\nagent-delegation ahp send|steer <session-uri> <chat-uri> <model-id> <prompt-file>\nagent-delegation ahp check|inspect|watch <config> <receipt>\nagent-delegation ahp submit <config> <receipt> <prompt-file>";
 
 fn matches_ack(value: &Value, chat: &str, id: &str, client_seq: i64) -> bool {
     value["action"]["id"] == id
@@ -148,6 +149,30 @@ async fn local_stream(path: &str) -> Result<LocalStream, &'static str> {
     Ok(stream)
 }
 
+async fn connect_endpoint(ep: &Value) -> Result<WebSocketStream<LocalStream>, &'static str> {
+    if ep["endpoint"]["type"] != "socket" {
+        return Err("expected a local socket endpoint");
+    }
+    let path = ep["endpoint"]["path"]
+        .as_str()
+        .ok_or("missing endpoint path")?;
+    let token = ep["connectionToken"]
+        .as_str()
+        .ok_or("missing existing token")?;
+    if token.is_empty()
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err("unexpected token encoding");
+    }
+    let stream = local_stream(path).await?;
+    let (ws, _) = tokio_tungstenite::client_async(format!("ws://localhost/?tkn={token}"), stream)
+        .await
+        .map_err(|_| "authenticated local handshake failed")?;
+    Ok(ws)
+}
+
 struct LocalWs(WebSocketStream<LocalStream>);
 impl Transport for LocalWs {
     async fn send(&mut self, m: TransportMessage) -> Result<(), TransportError> {
@@ -225,26 +250,7 @@ async fn run(args: &[String], editor: Option<targets::Editor>) -> Result<(), &'s
     let endpoints: Value = serde_json::from_slice(&output.stdout)
         .map_err(|_| "invalid endpoint discovery response")?;
     let ep = editor_endpoint(&endpoints, host_pid)?;
-    if ep["endpoint"]["type"] != "socket" {
-        return Err("expected a local socket endpoint");
-    }
-    let path = ep["endpoint"]["path"]
-        .as_str()
-        .ok_or("missing endpoint path")?;
-    let token = ep["connectionToken"]
-        .as_str()
-        .ok_or("missing existing token")?;
-    if token.is_empty()
-        || !token
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-    {
-        return Err("unexpected token encoding");
-    }
-    let stream = local_stream(path).await?;
-    let (ws, _) = tokio_tungstenite::client_async(format!("ws://localhost/?tkn={token}"), stream)
-        .await
-        .map_err(|_| "authenticated local handshake failed")?;
+    let ws = connect_endpoint(ep).await?;
     let client = Client::connect(LocalWs(ws), ClientConfig::default())
         .await
         .map_err(|_| "client initialization failed")?;
@@ -428,6 +434,16 @@ async fn main() {
         "ahp" => rest,
         _ => args.as_slice(), // Preserve the original positional AHP commands.
     };
+    if matches!(
+        args.first().map(String::as_str),
+        Some("check" | "inspect" | "submit" | "watch")
+    ) {
+        if let Err(error) = assignment::run(args).await {
+            eprintln!("{}", json!({"outcome":"uncertain", "diagnostic":error}));
+            std::process::exit(2);
+        }
+        return;
+    }
     match timeout(Duration::from_secs(45), run(args, call.editor)).await {
         Ok(Ok(())) => {}
         Ok(Err(message)) => {
