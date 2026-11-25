@@ -273,10 +273,11 @@ test('mid-tool steering with next priority redirects subsequent work; idempotent
 test('later-priority follow-up keeps stdin open until its replay is followed by a second result', async () => {
   const ctx = setup('steer-later');
   const runDir = ctx.runDir();
-  const owner = startRun(ctx, runDir, 'WRITE a.txt one\nSLEEP 800\nSAY first', ['--expect', 'a.txt']);
+  const owner = startRun(ctx, runDir, 'WRITE a.txt one\nWAIT_FOR_INPUT\nSAY first',
+    ['--expect', 'a.txt', '--timeout-seconds', '30']);
   await waitFor(() => exists(path.join(ctx.cwd, 'a.txt')), 10_000, 'a.txt');
   const s = await steer(runDir, ctx, 'WRITE b.txt two\nSAY second', ['--priority', 'later', '--wait-seconds', '10']);
-  assert.equal(s.code, 0);
+  assert.equal(s.code, 0, JSON.stringify(s.last));
   assert.ok(['replayed', 'answered'].includes(s.last.status), s.last.status);
   const r = await owner.done;
   assert.equal(r.code, 0, JSON.stringify(r.lines));
