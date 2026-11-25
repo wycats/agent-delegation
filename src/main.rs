@@ -2,6 +2,7 @@
 //! Discovers credentials in memory through VS Code; never writes or prints them.
 mod assignment;
 mod invocation;
+mod settings;
 use ahp::{Client, ClientConfig, Transport, TransportError, TransportMessage};
 use ahp_types::state::PendingMessageKind;
 use invocation::{
@@ -215,33 +216,22 @@ async fn snapshot(client: &Client, channel: &str) -> Result<Value, &'static str>
     }
     Ok(snapshot["state"].clone())
 }
-async fn run_chat(
-    editor: Editor,
-    session_uri: &str,
-    command: ChatCommand,
-) -> Result<(), &'static str> {
-    let Editor { code: cli, profile } = editor;
-    let hosts = code_agent(&cli, &["ps", "--all", "--json"], profile.as_deref())?
+async fn editor_inventory(editor: &Editor, args: &[&str]) -> Result<Value, &'static str> {
+    let output = code_agent(&editor.code, args, editor.profile.as_deref())?
+        .env_remove("VSCODE_IPC_HOOK_CLI")
         .output()
         .await
-        .map_err(|_| "host discovery failed")?;
-    if !hosts.status.success() {
-        return Err("host discovery failed");
-    }
-    let host_pid = session_host(
-        &serde_json::from_slice(&hosts.stdout)
-            .map_err(|_| "no host inventory; check code agent ps --all --json")?,
-        session_uri,
-    )?;
-    let output = code_agent(&cli, &["endpoints"], profile.as_deref())?
-        .output()
-        .await
-        .map_err(|_| "endpoint discovery failed")?;
+        .map_err(|_| "editor discovery failed")?;
     if !output.status.success() {
-        return Err("endpoint discovery failed");
+        return Err("editor discovery failed");
     }
-    let endpoints: Value = serde_json::from_slice(&output.stdout)
-        .map_err(|_| "invalid endpoint discovery response")?;
+    serde_json::from_slice(&output.stdout).map_err(|_| "invalid editor inventory")
+}
+
+async fn session_client(editor: &Editor, session_uri: &str) -> Result<Client, &'static str> {
+    let hosts = editor_inventory(editor, &["ps", "--all", "--json"]).await?;
+    let host_pid = session_host(&hosts, session_uri)?;
+    let endpoints = editor_inventory(editor, &["endpoints"]).await?;
     let ep = editor_endpoint(&endpoints, host_pid)?;
     let ws = connect_endpoint(ep).await?;
     let client = Client::connect(LocalWs(ws), ClientConfig::default())
@@ -256,23 +246,57 @@ async fn run_chat(
     if init["protocolVersion"] != "1.0.0" {
         return Err("host did not negotiate AHP 1.0.0");
     }
+    Ok(client)
+}
+
+fn chat_catalog(session: &Value) -> Result<&Vec<Value>, &'static str> {
+    session["chats"]
+        .as_array()
+        .ok_or("session chat catalog missing")
+}
+
+fn model_catalog<'a>(root: &'a Value, provider: &str) -> Result<&'a Vec<Value>, &'static str> {
+    root["agents"]
+        .as_array()
+        .and_then(|agents| agents.iter().find(|agent| agent["provider"] == provider))
+        .and_then(|agent| agent["models"].as_array())
+        .ok_or("host did not advertise a model catalog for this session provider")
+}
+
+async fn chat_snapshot(
+    client: &Client,
+    session: &Value,
+    chat: &str,
+) -> Result<Value, &'static str> {
+    if !chat_catalog(session)?
+        .iter()
+        .any(|entry| entry["resource"] == chat)
+    {
+        return Err("selected chat does not belong to the session");
+    }
+    snapshot(client, chat).await
+}
+
+fn last_chat_model(state: &Value) -> Option<&str> {
+    state["activeTurn"]["message"]["model"]["id"]
+        .as_str()
+        .or_else(|| state["turns"].as_array()?.last()?["message"]["model"]["id"].as_str())
+}
+
+async fn run_chat(
+    editor: Editor,
+    session_uri: &str,
+    command: ChatCommand,
+) -> Result<(), &'static str> {
+    let client = session_client(&editor, session_uri).await?;
     let session = snapshot(&client, session_uri).await?;
-    let chat_catalog = || {
-        session["chats"]
-            .as_array()
-            .ok_or("session chat catalog missing")
-    };
     let (chat, action) = match command {
         ChatCommand::Models => {
             let provider = session["provider"]
                 .as_str()
                 .ok_or("missing session provider")?;
             let root = snapshot(&client, "ahp-root://").await?;
-            let models = root["agents"]
-                .as_array()
-                .and_then(|agents| agents.iter().find(|agent| agent["provider"] == provider))
-                .and_then(|agent| agent["models"].as_array())
-                .ok_or("host did not advertise a model catalog for this session provider")?;
+            let models = model_catalog(&root, provider)?;
             for model in models {
                 println!(
                     "{}",
@@ -283,7 +307,7 @@ async fn run_chat(
             return Ok(());
         }
         ChatCommand::Chats => {
-            for chat in chat_catalog()? {
+            for chat in chat_catalog(&session)? {
                 println!(
                     "{}",
                     json!({"resource": chat["resource"], "title": chat["title"]})
@@ -295,13 +319,7 @@ async fn run_chat(
         ChatCommand::OnChat { chat, action } => (chat, action),
     };
     let chat = chat.as_str();
-    if !chat_catalog()?
-        .iter()
-        .any(|entry| entry["resource"] == chat)
-    {
-        return Err("selected chat does not belong to the session");
-    }
-    let state = snapshot(&client, chat).await?;
+    let state = chat_snapshot(&client, &session, chat).await?;
     match action {
         ChatAction::Status => {
             let active = &state["activeTurn"]["responseParts"];
@@ -332,14 +350,13 @@ async fn run_chat(
             println!(
                 "{}",
                 json!({
-                    "protocolVersion": init["protocolVersion"],
+                    "protocolVersion": "1.0.0",
                     "chat": chat,
                     "status": state["status"],
                     "activity": state["activity"],
                     "turns": state["turns"].as_array().map(Vec::len),
                     "activeTurnId": state["activeTurn"]["id"],
-                    "lastModelId": state["activeTurn"]["message"]["model"]["id"].as_str()
-                        .or_else(|| last.and_then(|turn| turn["message"]["model"]["id"].as_str())),
+                    "lastModelId": last_chat_model(&state),
                     "activeParts": parts,
                     "activeText": active_text.chars().rev().take(2400).collect::<String>().chars().rev().collect::<String>(),
                     "lastCompletedText": last_text.join("\n").chars().take(4000).collect::<String>(),
@@ -411,6 +428,12 @@ async fn main() {
         Err(UsageError::Assignment) => assignment_error(USAGE),
     };
     match call {
+        Invocation::Settings { path, open_browser } => {
+            if let Err(error) = settings::run(path, open_browser).await {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
         Invocation::Help(topic) => print_help(topic),
         Invocation::Claude(call) => {
             run_provider(include_bytes!("../providers/claude/runner.mjs"), call)
@@ -447,7 +470,10 @@ async fn main() {
 fn print_help(topic: HelpTopic) {
     match topic {
         HelpTopic::General => println!(
-            "agent-delegation [--config PATH] targets\nagent-delegation [--config PATH] --target NAME <command> [arguments]\nagent-delegation <ahp|claude|google> <command> [arguments]\n\n{USAGE}\nagent-delegation claude --help\nagent-delegation google --help"
+            "agent-delegation [--config PATH] settings [--no-open]\nagent-delegation [--config PATH] targets\nagent-delegation [--config PATH] --target NAME <command> [arguments]\nagent-delegation <ahp|claude|google> <command> [arguments]\n\n{USAGE}\nagent-delegation claude --help\nagent-delegation google --help"
+        ),
+        HelpTopic::Settings => println!(
+            "agent-delegation [--config PATH] settings [--no-open]\nOpen the target editor in your browser. Use --no-open to print the local URL only."
         ),
         HelpTopic::Ahp => println!("{USAGE}"),
         HelpTopic::NamedAhp { assignments } => {

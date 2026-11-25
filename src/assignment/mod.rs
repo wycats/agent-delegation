@@ -235,67 +235,12 @@ impl Assignment {
         {
             self.conn.plugin = Some(Plugin::open(path)?);
         }
-        let read_only = matches!(mode, AssignmentCommand::Check);
-        let client_id = if read_only {
-            Uuid::new_v4().to_string()
-        } else {
-            self.receipt["clientId"].as_str().unwrap().to_owned()
-        };
-        self.conn.attach(&client_id, !read_only).await?;
-        let session_state = self.conn.snapshot(&session).await?;
-        self.config
-            .verify_workspace(&session_state["workingDirectories"])?;
-        let target = &self.config.target;
+        let client_id = self.receipt["clientId"].as_str().unwrap().to_owned();
+        self.conn.attach(&client_id, true).await?;
+        let (session_state, mut state) = saved_snapshots(&mut self.conn, &self.config).await?;
         let provider = session_state["provider"]
             .as_str()
             .ok_or("session provider missing")?;
-        let expected_provider = target
-            .provider
-            .as_deref()
-            .or(target.ws_module.as_ref().map(|_| "copilotcli"));
-        if expected_provider.is_some_and(|p| p != provider) {
-            return Err("saved session provider differs");
-        }
-        let default_chat = session_state["defaultChat"] == chat;
-        if !default_chat
-            && (target.ws_module.is_some()
-                || !session_state["chats"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .any(|c| c["resource"] == chat))
-        {
-            return Err("saved chat is not available in the session");
-        }
-        let mut state = self.conn.snapshot(&chat).await?;
-        if !state["workingDirectories"].is_null() {
-            self.config.verify_workspace(&state["workingDirectories"])?;
-        }
-        if read_only {
-            self.config
-                .verify_model(&self.conn.snapshot("ahp-root://").await?, provider)?;
-            let model = state["activeTurn"]
-                .pointer("/message/model/id")
-                .or_else(|| {
-                    state["turns"]
-                        .as_array()?
-                        .last()?
-                        .pointer("/message/model/id")
-                })
-                .and_then(Value::as_str);
-            if model.is_some_and(|m| m != target.model.id) {
-                return Err("the reported turn model differs from the saved target");
-            }
-            println!(
-                "{}",
-                json!({
-                    "status": state["status"], "turnActive": !state["activeTurn"].is_null(),
-                    "queuedMessages": state["queuedMessages"].as_array().map(Vec::len),
-                    "lastModelId": model
-                })
-            );
-            return Ok(());
-        }
         if self.conn.terminal == Some("rejected") {
             self.persist()?;
         } else if let Some(ref id) = previous
@@ -380,6 +325,77 @@ impl Assignment {
     }
 }
 
+async fn saved_snapshots(conn: &mut Connection, config: &Config) -> Result<(Value, Value)> {
+    let session = conn.session.clone();
+    let chat = conn.chat.clone();
+    let session_state = conn.snapshot(&session).await?;
+    config.verify_workspace(&session_state["workingDirectories"])?;
+    let target = &config.target;
+    let provider = session_state["provider"]
+        .as_str()
+        .ok_or("session provider missing")?;
+    let expected_provider = target
+        .provider
+        .as_deref()
+        .or(target.ws_module.as_ref().map(|_| "copilotcli"));
+    if expected_provider.is_some_and(|p| p != provider) {
+        return Err("saved session provider differs");
+    }
+    let default_chat = session_state["defaultChat"] == chat;
+    if !default_chat
+        && (target.ws_module.is_some()
+            || !session_state["chats"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|c| c["resource"] == chat))
+    {
+        return Err("saved chat is not available in the session");
+    }
+    let state = conn.snapshot(&chat).await?;
+    if !state["workingDirectories"].is_null() {
+        config.verify_workspace(&state["workingDirectories"])?;
+    }
+    Ok((session_state, state))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CheckReport {
+    pub chat: String,
+    pub model: String,
+    pub thinking_level: Option<String>,
+    status: Value,
+    turn_active: bool,
+    queued_messages: Option<usize>,
+    last_model_id: Option<String>,
+}
+
+pub(crate) async fn check(config_path: &Path, receipt_path: &Path) -> Result<CheckReport> {
+    let receipt = read_json(receipt_path)?;
+    let config = Config::read(config_path, &receipt)?;
+    let mut conn = Connection::open(&config, &receipt).await?;
+    conn.attach(&Uuid::new_v4().to_string(), false).await?;
+    let (session_state, state) = saved_snapshots(&mut conn, &config).await?;
+    let provider = session_state["provider"]
+        .as_str()
+        .ok_or("session provider missing")?;
+    config.verify_model(&conn.snapshot("ahp-root://").await?, provider)?;
+    let model = crate::last_chat_model(&state);
+    if model.is_some_and(|m| m != config.target.model.id) {
+        return Err("the reported turn model differs from the saved target");
+    }
+    Ok(CheckReport {
+        chat: conn.chat,
+        model: config.target.model.id,
+        thinking_level: config.target.model.thinking,
+        status: state["status"].clone(),
+        turn_active: !state["activeTurn"].is_null(),
+        queued_messages: state["queuedMessages"].as_array().map(Vec::len),
+        last_model_id: model.map(str::to_owned),
+    })
+}
+
 fn target_plugin_uri(config: &Config) -> Option<String> {
     url::Url::from_file_path(config.target.plugin_root.as_ref()?.canonicalize().ok()?)
         .ok()
@@ -391,6 +407,13 @@ pub(super) async fn run(
     receipt_path: &Path,
     mode: AssignmentCommand,
 ) -> Result<()> {
+    if matches!(mode, AssignmentCommand::Check) {
+        let result = timeout(Duration::from_secs(45), check(config_path, receipt_path))
+            .await
+            .map_err(|_| "editor check timed out")??;
+        println!("{}", json!(result));
+        return Ok(());
+    }
     let prompt = if let AssignmentCommand::Submit(prompt_path) = &mode {
         let text = fs::read_to_string(prompt_path).map_err(|_| "cannot read UTF-8 prompt file")?;
         if text.trim().is_empty() {
@@ -403,11 +426,7 @@ pub(super) async fn run(
     let path = receipt_path
         .canonicalize()
         .map_err(|_| "receipt unavailable")?;
-    let _lock = if !matches!(mode, AssignmentCommand::Check) {
-        Some(ReceiptLock::acquire(&path)?)
-    } else {
-        None
-    };
+    let _lock = ReceiptLock::acquire(&path)?;
     let receipt = read_json(&path)?;
     let config = Config::read(config_path, &receipt)?;
     let previous_turn = receipt["attempt"]["turnId"].clone();
@@ -425,18 +444,16 @@ pub(super) async fn run(
         conn,
     };
     let result = assignment.operate(&mode, prompt).await;
-    if !matches!(mode, AssignmentCommand::Check) {
-        assignment.persist()?;
-        assignment.progress(false)?;
-        // The host can disconnect immediately after replaying the rejected
-        // dispatch. That proof survives even if a later snapshot failed.
-        let watching_this_attempt = matches!(mode, AssignmentCommand::Watch)
-            || (matches!(mode, AssignmentCommand::Submit(_))
-                && assignment.receipt["attempt"]["turnId"] != previous_turn);
-        if watching_this_attempt && assignment.conn.terminal == Some("rejected") {
-            report_rejected(&assignment.receipt);
-            return Ok(());
-        }
+    assignment.persist()?;
+    assignment.progress(false)?;
+    // The host can disconnect immediately after replaying the rejected
+    // dispatch. That proof survives even if a later snapshot failed.
+    let watching_this_attempt = matches!(mode, AssignmentCommand::Watch)
+        || (matches!(mode, AssignmentCommand::Submit(_))
+            && assignment.receipt["attempt"]["turnId"] != previous_turn);
+    if watching_this_attempt && assignment.conn.terminal == Some("rejected") {
+        report_rejected(&assignment.receipt);
+        return Ok(());
     }
     result
 }

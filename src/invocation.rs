@@ -3,6 +3,10 @@ use std::path::PathBuf;
 
 #[derive(Debug, PartialEq)]
 pub enum Invocation {
+    Settings {
+        path: PathBuf,
+        open_browser: bool,
+    },
     Help(HelpTopic),
     Chat {
         editor: Editor,
@@ -21,6 +25,7 @@ pub enum Invocation {
 #[derive(Debug, PartialEq)]
 pub enum HelpTopic {
     General,
+    Settings,
     Ahp,
     NamedAhp { assignments: bool },
 }

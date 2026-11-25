@@ -1,2 +1,5 @@
 /target/
+/ui/build/
+/ui/.svelte-kit/
+/ui/node_modules/
 /providers/claude/.test-tmp/

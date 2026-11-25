@@ -6,6 +6,7 @@
 // message text as a tiny script, one directive per line:
 //   WRITE <relpath> <content...>   tool call that writes a file under cwd
 //   SLEEP <ms>                     a long-running tool call
+//   WAIT_FOR_INPUT                 hold the turn until another input arrives or stdin closes
 //   SAY <text>                     assistant text; the last SAY is the result text
 // Like the real CLI's `next` priority, a message arriving mid-turn is read after
 // the running tool call finishes and replaces the remaining directives; `later`
@@ -47,10 +48,8 @@ readline.createInterface({ input: process.stdin })
   .on('line', line => { if (line.trim()) { inbox.push(JSON.parse(line)); poke(); } })
   .on('close', () => { stdinEnded = true; poke(); });
 
-async function nextMessage() {
-  for (;;) {
-    if (inbox.length) return inbox.shift();
-    if (stdinEnded) return null;
+async function waitForInput() {
+  while (!inbox.length && !stdinEnded) {
     await new Promise(r => { wake = r; });
   }
 }
@@ -96,6 +95,8 @@ async function step(d, said) {
     assistant([{ type: 'tool_use', id: tid, name: 'Bash', input: { command: `sleep ${d.rest[0]}` } }]);
     await sleep(Number(d.rest[0]));
     emit({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: tid, content: 'slept' }] }, session_id: session, uuid: randomUUID() });
+  } else if (d.op === 'WAIT_FOR_INPUT') {
+    await waitForInput();
   } else if (d.op === 'SAY') {
     said.text = d.rest.join(' ');
     assistant([{ type: 'text', text: said.text }]);
@@ -138,7 +139,8 @@ async function turn(first) {
 }
 
 for (;;) {
-  const msg = await nextMessage();
+  await waitForInput();
+  const msg = inbox.shift();
   if (!msg) break;
   await turn(msg);
   if (sc.exitAfterTurn) { process.stdin.destroy(); break; } // early EOF without waiting for stdin

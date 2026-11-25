@@ -1,5 +1,8 @@
 use super::{Result, plugin::Plugin, profile::Config};
-use crate::{LocalStream, code_agent, connect_endpoint, editor_endpoint, session_host};
+use crate::{
+    LocalStream, connect_endpoint, editor_endpoint, editor_inventory, invocation::Editor,
+    session_host,
+};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::time::{Duration, Instant, timeout, timeout_at};
@@ -28,26 +31,20 @@ pub(super) struct Connection {
 impl Connection {
     pub async fn open(config: &Config, receipt: &Value) -> Result<Self> {
         let target = &config.target;
-        let discover = async |args: &[&str]| -> Result<Value> {
-            let cli = target.cli.to_str().ok_or("invalid editor CLI path")?;
-            let profile = target
-                .profile
-                .to_str()
-                .ok_or("invalid editor profile path")?;
-            let output = code_agent(cli, args, Some(profile))?
-                .env_remove("VSCODE_IPC_HOOK_CLI")
-                .output()
-                .await
-                .map_err(|_| "editor discovery failed")?;
-            if !output.status.success() {
-                return Err("editor discovery failed");
-            }
-            serde_json::from_slice(&output.stdout).map_err(|_| "invalid editor inventory")
+        let editor = Editor {
+            code: target.cli.to_str().ok_or("invalid editor CLI path")?.into(),
+            profile: Some(
+                target
+                    .profile
+                    .to_str()
+                    .ok_or("invalid editor profile path")?
+                    .into(),
+            ),
         };
         let session = receipt["session"].as_str().ok_or("missing session")?;
-        let hosts = discover(&["ps", "--all", "--json"]).await?;
+        let hosts = editor_inventory(&editor, &["ps", "--all", "--json"]).await?;
         let pid = session_host(&hosts, session)?;
-        let endpoints = discover(&["endpoints"]).await?;
+        let endpoints = editor_inventory(&editor, &["endpoints"]).await?;
         let endpoint = editor_endpoint(&endpoints, pid)?;
         if endpoint["instanceId"] != target.instance_id {
             return Err("saved editor instance differs from session host");
