@@ -1,6 +1,6 @@
 <script>
 	import { onMount, tick, untrack } from 'svelte';
-	import { api, show, text } from './settings.js';
+	import { api, backendLabel, show, text } from './settings.js';
 
 	let { entry = null, busy = false, error = '', onsave, oncancel, ondelete, onreload = null } = $props();
 
@@ -12,8 +12,13 @@
 	const ahp = origKind === 'ahp' ? o : {};
 
 	let name = $state(original?.name ?? '');
-	let kind = $state(origKind ?? 'claude');
-	let model = $state(origKind === 'ahp' || origKind === 'saved' ? '' : text(o.model));
+	let useChat = $state(origKind === 'ahp');
+	let assignmentHost = $state(origKind === 'ahp' ? '' : origKind ?? '');
+	let kind = $derived(useChat ? 'ahp' : assignmentHost);
+	let modelsByHost = $state({
+		claude: origKind === 'claude' ? text(o.model) : '',
+		google: origKind === 'google' ? text(o.model) : ''
+	});
 	let config = $state(text(o.assignment?.config));
 	let receipt = $state(text(o.assignment?.receipt));
 	let code = $state(text(ahp.code));
@@ -120,10 +125,11 @@
 				chat === o.chat &&
 				chatModel === o.model
 			);
-		return model === text(o.model);
+		return modelsByHost[kind] === text(o.model);
 	}
 
 	function buildTarget() {
+		if (!kind) return 'Choose where to run assignments.';
 		if (kind === 'saved') {
 			if (!config.trim() || !receipt.trim()) return 'Enter both assignment references.';
 			const assignment = { config: ref(config, o.assignment?.config), receipt: ref(receipt, o.assignment?.receipt) };
@@ -133,6 +139,7 @@
 			if (session == null || chat == null || chatModel == null) return 'Select a session, chat and model.';
 			return { backend: 'ahp', ...editor(), session, chat, model: chatModel };
 		}
+		const model = modelsByHost[kind];
 		if (!model.trim()) return 'Enter a model.';
 		return { backend: kind, model: ref(model, o.model) };
 	}
@@ -171,58 +178,63 @@
 	</div>
 {/snippet}
 
-<form aria-label={original ? `Editing ${original.name}` : 'New target'} onsubmit={submit}>
-	<div class="grid">
+{#snippet connection()}
+	<div class="field">
+		<label for="target-purpose">What will you use this target for?</label>
+		<select id="target-purpose" bind:value={useChat}>
+			<option value={false}>Run assignments</option>
+			<option value={true}>Message a VS Code chat</option>
+		</select>
+	</div>
+	{#if !useChat}
 		<div class="field">
-			<label for="target-name">Target name</label>
-			<input id="target-name" bind:this={nameInput} bind:value={name} required autocomplete="off" spellcheck="false" />
-		</div>
-		<div class="field">
-			<label for="target-backend">Backend</label>
-			<select id="target-backend" bind:value={kind}>
+			<label for="target-host">Where should assignments run?</label>
+			<select id="target-host" bind:value={assignmentHost}>
+				<option value="" disabled>Choose an app</option>
 				<option value="claude">Claude Code</option>
 				<option value="google">Google Antigravity</option>
-				<option value="ahp">VS Code chat</option>
-				<option value="saved">Saved VS Code assignment</option>
+				<option value="saved">VS Code (existing assignment setup)</option>
 			</select>
 		</div>
-	</div>
+	{/if}
 
 	{#if entry?.error}
 		<p class="error">{entry.error}</p>
 	{/if}
 
 	{#if kind === 'saved'}
+		<p class="hint">Use the two files from your existing assignment setup. The config specifies the editor, model and reasoning settings. The receipt identifies the chat to resume.</p>
 		{#if entry?.resolved && config === text(o.assignment?.config) && receipt === text(o.assignment?.receipt)}
-		<dl>
-			{#each details as [label, value]}
-				<div><dt>{label}</dt><dd>{show(value) || '—'}</dd></div>
-			{/each}
-		</dl>
+			<dl>
+				{#each details as [label, value]}
+					<div><dt>{label}</dt><dd>{show(value) || '—'}</dd></div>
+				{/each}
+			</dl>
 		{/if}
 		<div class="grid">
 			<div class="field">
-				<label for="target-config">Config reference</label>
+				<label for="target-config">Assignment config file</label>
 				<input id="target-config" bind:value={config} autocomplete="off" spellcheck="false" />
 			</div>
 			<div class="field">
-				<label for="target-receipt">Receipt reference</label>
+				<label for="target-receipt">Chat receipt file</label>
 				<input id="target-receipt" bind:value={receipt} autocomplete="off" spellcheck="false" />
 			</div>
 		</div>
 	{:else if kind === 'ahp'}
+		<p class="hint">Pick an open chat to send messages and check its status. To submit tasks and collect completed results, choose Run assignments.</p>
 		<div class="grid">
 			<div class="field">
-				<label for="target-code">Chat editor <span>optional</span></label>
+				<label for="target-code">VS Code executable <span>optional</span></label>
 				<input id="target-code" bind:value={code} oninput={editorChanged} placeholder="code" autocomplete="off" spellcheck="false" />
 			</div>
 			<div class="field">
-				<label for="target-profile">Profile directory <span>optional</span></label>
+				<label for="target-profile">User data directory <span>optional</span></label>
 				<input id="target-profile" bind:value={profile} oninput={editorChanged} autocomplete="off" spellcheck="false" />
 			</div>
 		</div>
 		<div class="discover">
-			<button type="button" onclick={discoverSessions}>Discover sessions</button>
+			<button type="button" onclick={discoverSessions}>Find open sessions</button>
 			<span role="status">{discovering}</span>
 			{#if discoverError}
 				<span class="error" role="alert">{discoverError}</span>
@@ -233,11 +245,27 @@
 			{@render picker('target-chat', 'Chat', chatOptions, () => chat, (next) => (chat = next), emptyText(chats, 'chats'))}
 			{@render picker('target-chat-model', 'Model', modelOptions, () => chatModel, (next) => (chatModel = next), emptyText(models, 'models'))}
 		</div>
-	{:else}
+	{:else if kind}
 		<div class="field">
 			<label for="target-model">Model</label>
-			<input id="target-model" bind:value={model} autocomplete="off" spellcheck="false" />
+			<input id="target-model" bind:value={modelsByHost[kind]} placeholder={kind === 'claude' ? 'e.g. claude-fable-5-2' : 'e.g. gemini-4-neon-high'} autocomplete="off" spellcheck="false" />
 		</div>
+	{/if}
+{/snippet}
+
+<form aria-label={original ? `Editing ${original.name}` : 'New target'} onsubmit={submit}>
+	<div class="field">
+		<label for="target-name">Target name</label>
+		<input id="target-name" bind:this={nameInput} bind:value={name} aria-describedby="name-help" required autocomplete="off" spellcheck="false" />
+		<small id="name-help">Use this name with <code>--target</code> in the CLI.</small>
+	</div>
+	{#if original}
+		<details>
+			<summary>Connection settings · {backendLabel(o)}</summary>
+			<div class="connection">{@render connection()}</div>
+		</details>
+	{:else}
+		{@render connection()}
 	{/if}
 
 	{#if invalid || error}
@@ -270,6 +298,9 @@
 		gap: 0.75rem;
 		width: 100%;
 	}
+	.connection { display: grid; gap: 0.75rem; margin-top: 0.75rem; }
+	summary { cursor: pointer; }
+	.hint, small { margin: 0; color: var(--muted); }
 	.grid {
 		display: grid;
 		grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));

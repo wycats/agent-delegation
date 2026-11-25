@@ -137,6 +137,7 @@
 		{#if snapshot}
 			<section class="panel" aria-labelledby="targets-heading">
 				<h2 id="targets-heading">Targets</h2>
+				<p class="usage">Use an existing name with <code>--target</code>. Add a target when you want to name another destination.</p>
 				{#if snapshot.targets.length}
 					<ul>
 						{#each snapshot.targets as t (t.name)}
@@ -342,6 +343,7 @@
 		margin: 0;
 		padding: 0.75rem 1rem;
 	}
+	.usage { margin: 0; padding: 0.65rem 1rem; color: var(--muted); }
 	.new {
 		padding: 0.6rem 1rem;
 	}

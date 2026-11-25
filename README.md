@@ -14,7 +14,9 @@ On Windows, a named Google target completed a live text assignment and resumed t
 
 Run `agent-delegation settings` to open the target editor in your browser. The page shows which TOML file you’re editing. To select a different file, run `agent-delegation --config PATH settings`. You can also create your first target there.
 
-Choose Claude Code or Google Antigravity and enter the host’s model ID. For a VS Code chat, select its editor and profile, discover sessions, then pick the chat and model from that session. For a saved assignment, enter the existing config and receipt paths. Renaming the target edits its name in the TOML file. **Check** verifies an existing VS Code binding without sending a message.
+If your target is already listed, you can use its name immediately. For example, `agent-delegation --target work-neon check` verifies a saved VS Code assignment, and `agent-delegation --target work-neon submit task.txt` sends it a task. To rename a target, choose **Edit**, change **Target name**, and save.
+
+Choose **Add target** for a new destination. Under **Run assignments**, choose Claude Code or Google Antigravity and enter a model ID. If you already have a VS Code assignment config and chat receipt, choose **VS Code (existing assignment setup)** and enter their paths. To send individual messages to an open editor chat, choose **Message a VS Code chat**, then **Find open sessions** and select the session, chat and model.
 
 The executable serves the embedded page on a temporary loopback port. Use `settings --no-open` to print its private launch URL. Close the session from the page or stop the command in the terminal. The server also expires after 15 minutes without an authenticated request.
 

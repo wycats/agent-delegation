@@ -40,6 +40,6 @@ export const show = (value) => value?.label ?? text(value);
 export function backendLabel(target) {
 	if (target?.backend === 'claude') return 'Claude Code';
 	if (target?.backend === 'google') return 'Google Antigravity';
-	if (target?.backend === 'ahp') return target.assignment ? 'Saved VS Code assignment' : 'VS Code chat';
+	if (target?.backend === 'ahp') return target.assignment ? 'VS Code · Assignments' : 'VS Code · Chat messages';
 	return text(target?.backend) || 'Unknown backend';
 }
